@@ -21,7 +21,7 @@ async def kline_listener(bot):
             k = msg['k']
             if k['x']:
                 bot.on_candle(float(k['o']), float(k['h']), float(k['l']), float(k['c']), float(k['v']))
-                print(f"✅ Balance: {bot.available_capital:.2f} open: {k['o']} high: {k['h']} low: {k['l']} close: {k['c']} volume: {k['v']}")
+                print(f"✅ open: {k['o']} high: {k['h']} low: {k['l']} close: {k['c']} volume: {k['v']}")
 
 async def main():
 
