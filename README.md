@@ -36,13 +36,10 @@
 |  | `hedge_size_ratio` | 50% ของ BNB ที่ถืออยู่ |
 |  | `hedge_leverage` | 2x |
 |  | `hedge_close_trigger` | ราคา > Hedge Entry + ATR |
-| Capital | `initial_capital` | สำหรับ Backtest / Forword Test ทำเป็นตัวแปร 
-สำหรับ Live ดึงจาก API ของ CCTX Binance |
+| Capital | `initial_capital` | สำหรับ Backtest / Forword Test ทำเป็นตัวแปร <br> สำหรับ Live ดึงจาก API ของ CCTX Binance |
 |  | `reserve_ratio` | 30% ของทุน ถือเป็นเงินสด |
-| Fee | `spot_fee` | สำหรับ Backtest / Forword Test ทำเป็นตัวแปร 
-สำหรับ Live ดึงจาก API ของ CCTX Binance |
-|  | `futures_fee` | สำหรับ Backtest / Forword Test ทำเป็นตัวแปร 
-สำหรับ Live ดึงจาก API ของ CCTX Binance |
+| Fee | `spot_fee` | สำหรับ Backtest / Forword Test ทำเป็นตัวแปร <br> สำหรับ Live ดึงจาก API ของ CCTX Binance |
+|  | `futures_fee` | สำหรับ Backtest / Forword Test ทำเป็นตัวแปร <br> สำหรับ Live ดึงจาก API ของ CCTX Binance |
 |  | `funding_rate` | สำหรับ Backtest / Forword Test ทำเป็นตัวแปร 
 สำหรับ Live ดึงจาก API ของ CCTX Binance |
 
