@@ -2,7 +2,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from db import GridStateDB
+from database.grid_states_db import GridStateDB
 
 class TestGridStateDB(unittest.TestCase):
     def setUp(self):

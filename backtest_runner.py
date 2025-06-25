@@ -2,25 +2,26 @@ import os
 import sys
 import pandas as pd
 from strategy import USDTGridStrategy
+from logger import Logger
 from config import CONFIG
 
 def backtest_from_file(
-    file_path: str,
-    initial_capital: float,
-    reserve_ratio: float,
-    order_size_usdt: float,
-    hedge_size_ratio: float,
-    db_path: str,
-    atr_period: int = 14,
-    atr_mean_window: int = 100
-):
-    # 1. อ่านไฟล์ OHLCV
-    df = pd.read_csv(file_path, parse_dates=['Time'])
-    df.rename(columns={'Time': 'time', 'Open': 'open', 'High': 'high',
-                       'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
-    df.set_index('time', inplace=True)
+        file_path: str,
+        initial_capital: float,
+        reserve_ratio: float,
+        order_size_usdt: float,
+        hedge_size_ratio: float,
+        db_path: str,
+        atr_period: int = 14,
+        atr_mean_window: int = 100,
+        logger: Logger = None,
+    ):
 
-    # 2. สร้าง bot ในโหมด forward_test
+    df = pd.read_csv(file_path, parse_dates=['Time'])
+    df.rename(columns={'Time': 'Time', 'Open': 'Open', 'High': 'High',
+                       'Low': 'Low', 'Close': 'Close', 'Volume': 'Volume'}, inplace=True)
+    df.set_index('Time', inplace=True)
+
     bot = USDTGridStrategy(
         initial_capital=initial_capital,
         mode='forward_test',
@@ -30,47 +31,44 @@ def backtest_from_file(
         hedge_size_ratio=hedge_size_ratio,
         atr_period=atr_period,
         atr_mean_window=atr_mean_window,
-        enivronment='development',  # ใช้โหมด development สำหรับ backtest
+        enivronment='development',
     )
-    # ไม่ต้องเชื่อมต่อ exchange จริง
+
     bot.set_exchanges(None, None, symbol=None)
 
-    # 3. Bootstrap เพื่อคำนวณ ATR และวางกริดแรก
     warmup_len = atr_mean_window
     history = df.iloc[:warmup_len]
     bot.bootstrap(history)
 
-    # 4. วนอ่านแท่งเทียนที่เหลือทีละแท่ง
-    for timestamp, row in df.iloc[warmup_len:].iterrows():
+    for _, row in df.iloc[warmup_len:].iterrows():
         bot.on_candle(
-            open=row['open'],
-            high=row['high'],
-            low=row['low'],
-            close=row['close'],
-            volumn=row['volume']
+            open=row['Open'],
+            high=row['High'],
+            low=row['Low'],
+            close=row['Close'],
+            volumn=row['Volume']
         )
 
-    # 5. แสดงสรุปผล
     summary = bot.get_summary()
-    print("\n===== Backtest Summary =====")
+    logger.log(f"===== Backtest Summary =====", level="INFO")
     for k, v in summary.items():
-        print(f"{k}: {v}")
-
+        logger.log(f"{k}: {v}", level="INFO")
 
 def main():
-    # อ่านค่า environment variables
-    file_path       = os.getenv('OHLCV_FILE')
-    if not file_path:
-        print('Environment variable OHLCV_FILE is required.', file=sys.stderr)
-        sys.exit(1)
-
     initial_capital  = 10000
     reserve_ratio    = 0.3
     order_size_usdt  = 500
-    hedge_size_ratio = float(os.getenv('HEDGE_SIZE_RATIO', '0.5'))
-    db_path          = os.getenv('DB_PATH', ':memory:')
-    atr_period       = int(os.getenv('ATR_PERIOD', '14'))
-    atr_mean_window  = int(os.getenv('ATR_MEAN_WINDOW', '100'))
+    hedge_size_ratio = 0.3
+    db_path          = "./db/backtest_bot.db"
+    atr_period       = 14
+    atr_mean_window  = 100
+
+    logger = Logger(env=CONFIG['environment'], db_path=db_path)
+    file_path = "backtests/data/bnbusdt_1h.csv"
+
+    if not file_path:
+        logger.log(f"Environment variable OHLCV_FILE is required. in {sys.stderr} mode", level="ERROR")
+        sys.exit(1)
 
     backtest_from_file(
         file_path=file_path,
@@ -80,7 +78,8 @@ def main():
         hedge_size_ratio=hedge_size_ratio,
         db_path=db_path,
         atr_period=atr_period,
-        atr_mean_window=atr_mean_window
+        atr_mean_window=atr_mean_window,
+        logger=logger
     )
 
 if __name__ == '__main__':

@@ -3,7 +3,10 @@ import os
 import pandas as pd
 import numpy as np
 from typing import Any, Dict, List, Tuple, Optional
-from db import GridStateDB
+from database.future_orders_db import FuturesOrdersDB
+from database.grid_states_db import GridStateDB
+from database.spot_orders_db import SpotOrdersDB
+
 from exchange import ExchangeSync
 from logger import Logger
 
@@ -35,6 +38,7 @@ class USDTGridStrategy:
         # ATR settings
         self.atr_period = atr_period
         self.atr_mean_window = atr_mean_window
+        
         # Deques for streaming ATR & ATR_mean
         self.tr_history = deque(maxlen=self.atr_period)       # to compute ATR
         self.atr_history = deque(maxlen=self.atr_mean_window) # to compute ATR_mean
@@ -50,6 +54,8 @@ class USDTGridStrategy:
         if self.mode == "forward_test":
             self.db = GridStateDB(db_path)
             self.logger.log(f"GridStateDB initialized at {db_path}", level="DEBUG")
+        else:
+            self.db = None
 
         # runtime state
         self.reset()
@@ -73,8 +79,6 @@ class USDTGridStrategy:
         self.hedge_active = False
         self.hedge_entry_price = 0.0
         self.hedge_qty = 0.0
-        self.spot_log = []
-        self.futures_log = []
         self.tr_history.clear()
         self.atr_history.clear()
         self.prev_close = None
@@ -96,29 +100,25 @@ class USDTGridStrategy:
             self.db.save_state(self.grid_state)
             self.logger.log("Saved grid state to SQLite", level="DEBUG")
 
-    def initialize_grid(self, base_price: float, spacing: float, levels: int = 3):
-        self.grid_prices = [round(base_price - spacing * i, 2) for i in range(1, levels+1)]
+    def initialize_grid(self, base_price: float, spacing: float, levels: int = 10):
+
+        if self.db:
+           self.db.cancel_open()
+        
+        self.center_price = base_price
+        self.spacing      = spacing
+        
+        lower = [float(round(base_price - spacing * i, 2)) for i in range(1, levels+1)]
+        upper = [float(round(base_price + spacing * i, 2)) for i in range(1, levels+1)]
+
+        self.grid_prices = lower + upper
+
         self.grid_initialized = True
-        self.grid_state = {p: False for p in self.grid_prices}
-        self.save_grid_state()
-        self.logger.log(f"Grid initialized with prices: {self.grid_prices}", level="INFO")
+        self.grid_state = {p: 'open' for p in self.grid_prices}
+        self.logger.log(f"Grid initialized with prices: {self.grid_prices}, Center price: {self.center_price}, Spacing: {spacing}", level="INFO")
 
-        if self.mode == "live" and self.exchange_sync:
-            for price in self.grid_prices:
-                qty = round(self.order_size_usdt / price, 6)
-                self.exchange_sync.place_limit_buy(self.symbol, price, qty)
-                self.logger.log(f"Placed live limit buy for {qty}@{price}", level="INFO")
-                self.grid_state[price] = True
-
-    def bootstrap(self, history_df: pd.DataFrame):
-        """
-        1) คำนวณ full TR, ATR, ATR_mean บน history
-        2) dropna หนึ่งครั้ง
-        3) เติม deque ให้พร้อมสำหรับ streaming
-        4) initialize_grid
-        """
-        df = history_df.copy()
-
+    def bootstrap(self, history: pd.DataFrame):
+        df = history.copy()
         # 1. calculate true range series
         tr = pd.concat([
             df['High'] - df['Low'],
@@ -147,7 +147,35 @@ class USDTGridStrategy:
         last = df.iloc[-1]
         spacing = last['ATR'] * (2.0 if last['ATR'] > last['ATR_mean'] else 1.0)
         self.initialize_grid(last['Close'], spacing)
-        self.logger.log(f"Bootstrapped grid at {last.name} price={last['Close']} spacing={spacing}", level="INFO")
+        self.place_initial_orders(self)
+
+    def place_initial_orders(self) -> None:
+        for price in self.grid_prices:
+            qty = round(self.order_size_usdt / price, 6)
+            if self.mode == "live" and self.exchange_sync:
+                if price < self.center_price:
+                    self.exchange_sync.place_limit_buy(self.symbol, price, qty)
+                    self.logger.log(f"Placed live limit buy for {qty}@{price}", level="INFO")
+                else:
+                    self.exchange_sync.place_limit_sell(self.symbol, price, qty)
+                    self.logger.log(f"Placed live limit sell for {qty}@{price}", level="INFO")
+                self.grid_state[price] = 'open'
+            elif self.mode == "forward_test":
+                if price < self.center_price:
+                    qty = round(self.order_size_usdt / price, 6)
+                    self.positions.append((qty, price, round(price + self.spacing, 2), self.spacing))
+                    self.logger.log(f"Simulated open buy {qty}@{price}", level="INFO")
+                    self.db.mark_open(price)
+                    self.grid_state[price] = 'open'
+                if price > self.center_price:
+                    qty = round(self.order_size_usdt / price, 6)
+                    self.positions.append((qty, price, round(price + self.spacing, 2), self.spacing))
+                    self.logger.log(f"Simulated open sell {qty}@{price}", level="INFO")
+                    self.db.mark_open(price)
+                    self.grid_state[price] = 'open'
+
+        if self.mode == "forward_test":
+            self.save_grid_state()
 
     def on_candle(self, open: float, high: float, low: float, close: float, volumn: float) -> None:
         # คำนวณ True Range จากแท่งนี้
@@ -210,10 +238,15 @@ class USDTGridStrategy:
         self.available_capital -= (self.order_size_usdt + fee)
         target = round(price + spacing, 2)
         self.positions.append((qty, price, target, spacing))
-        msg = f"Grid BUY {qty}@{price}, target={target}"
-        self.logger.log(msg, level="INFO")
-        self.spot_log.append((timestamp, 'buy', price, qty, target))
         self.grid_state[price] = True
+        self.logger.log(f"Grid Buy Price={price}, Targe Price={target}, Qty={qty}, Fee={fee}", level="DEBUG")
+
+        if self.exchange_sync and self.mode == "live":
+            self.exchange_sync.place_limit_buy(self.symbol, price, qty)
+            self.logger.log(f"Placed live limit buy for Grid Buy Price={price}, Targe Price={target}, Qty={qty}, Fee={fee}", level="INFO")
+        
+        if self.db:
+           self.db.save_state(self.grid_state)
 
     def _check_sell(self, timestamp, price: float) -> None:
         new_positions = []
@@ -224,10 +257,16 @@ class USDTGridStrategy:
                 pnl = notional - (qty * entry) - fee
                 self.available_capital += notional - fee
                 self.realized_grid_profit += pnl
-                msg = f"Grid SELL {qty}@{price}, entry={entry}, PnL={pnl}"
-                self.logger.log(msg, level="INFO")
-                self.spot_log.append((timestamp, 'sell', price, qty, entry, pnl))
+                self.logger.log(f"Grid SELL Entry Price={entry}, Sell Price={price}, Qty={qty}, Notional={notional}, Fee={fee}, PnL={pnl}", level="DEBUG")
                 self.grid_state[entry] = False
+
+                if self.exchange_sync and self.mode == "live":
+                    self.exchange_sync.place_market_order(self.symbol, 'sell', qty)
+                    self.logger.log(f"Placed live market sell for Sell Price={price}, Qty={qty}, Notional={notional}, Fee={fee}, PnL={pnl}", level="INFO")
+
+                if self.db:
+                    self.db.mark_filled(entry)
+
             else:
                 new_positions.append((qty, entry, target, spacing))
         self.positions = new_positions
@@ -240,7 +279,6 @@ class USDTGridStrategy:
                 self.exchange_sync.place_market_order(self.symbol, 'sell', self.hedge_qty)
             self.hedge_active = True
             self.logger.log(f"HEDGE OPEN qty={self.hedge_qty}@{price}", level="INFO")
-            self.futures_log.append(('hedge_open', price, self.hedge_qty))
         elif self.hedge_active and price > self.hedge_entry_price + atr:
             if self.exchange_sync and self.mode == "live":
                 self.exchange_sync.place_market_order(self.symbol, 'buy', self.hedge_qty)
@@ -248,7 +286,6 @@ class USDTGridStrategy:
             self.realized_hedge_profit += pnl
             self.hedge_active = False
             self.logger.log(f"HEDGE CLOSE qty={self.hedge_qty}@{price}, PnL={pnl}", level="INFO")
-            self.futures_log.append(('hedge_close', price, self.hedge_qty, pnl))
 
     def calculate_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
         tr = pd.concat([
