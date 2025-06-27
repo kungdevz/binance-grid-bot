@@ -1,5 +1,3 @@
-# db.py
-
 import sqlite3
 from typing import Dict
 
@@ -8,7 +6,7 @@ class GridStateDB:
     Handles persistence of grid state using SQLite, with statuses and timestamps.
     """
 
-    def __init__(self, db_path: str = "db/backtest_bot.db"):
+    def __init__(self, db_path: str = "database/schema/backtest_bot.db"):
         self.db_path = db_path
         self._init_db()
 

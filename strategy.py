@@ -56,7 +56,6 @@ class USDTGridStrategy:
             self.logger.log(f"GridStateDB initialized at {db_path}", level="DEBUG")
         else:
             self.db = None
-
         # runtime state
         self.reset()
 
