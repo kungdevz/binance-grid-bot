@@ -5,7 +5,7 @@ class SpotOrdersDB:
     """
     CRUD operations for spot_orders table.
     """
-    def __init__(self, db_path: str = "db/backtest_bot.db"):
+    def __init__(self, db_path: str = "database/schema/backtest_bot.db"):
         self.db_path = db_path
         self._init_schema()
 

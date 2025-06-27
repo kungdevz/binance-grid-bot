@@ -4,7 +4,7 @@ import pandas as pd
 
 class IndicatorsDatabase:
 
-    def __init__(self, db_path: str = 'bot.db'):
+    def __init__(self, db_path: str = 'database/schema/backtest_bot.db'):
         self.db_path = db_path
         self.create_ohlcv_table()
 
