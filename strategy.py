@@ -2,7 +2,7 @@ from collections import deque
 import os
 import pandas as pd
 import numpy as np
-import utils
+import utils.utils as ut
 from typing import Any, Dict, List, Tuple, Optional
 from database.future_orders_db import FuturesOrdersDB
 from database.grid_states_db import GridStateDB
@@ -17,7 +17,6 @@ class USDTGridStrategy:
     def __init__(
         self,
         symbol: str,
-        db: Any,
         initial_capital: float = 10000,
         mode: str = "forward_test",
         db_path: str = "grid_state.db",
@@ -73,9 +72,6 @@ class USDTGridStrategy:
         self.reserve_capital = self.initial_capital * self.reserve_ratio
         self.realized_grid_profit = 0.0
         self.realized_hedge_profit = 0.0
-        self.positions: List[Tuple[float, float, float, float]] = []
-        self.grid_prices: List[float] = []
-        self.grid_state: Dict[float, bool] = {}
         self.grid_initialized = False
         self.hedge_active = False
         self.hedge_entry_price = 0.0
@@ -121,10 +117,9 @@ class USDTGridStrategy:
         upper = [float(round(base_price + spacing * i, 2)) for i in range(1, levels+1)]
 
         self.grid_prices = lower + upper
-        
         self.logger.log(f"Grid initialized with prices: {self.grid_prices}, Center price: {self.center_price}, Spacing: {spacing}", level="INFO")
+        group_id = ut.generate_order_id('INIT')
 
-        group_id = utils.generate_order_id('INIT')
         for price in self.grid_prices:
             db = GridStateDB(db_path=self.db_path)
             items = {
@@ -144,10 +139,14 @@ class USDTGridStrategy:
             (df['Low']  - df['Close'].shift()).abs()
         ], axis=1).max(axis=1)
 
-        # 2. rolling ATR & ATR_mean
+        # 2. Rolling TR & ATR
+        _calc_tr_single = self._calc_tr_single
+        if len(df) < self.atr_period:
+            self.logger.log("Not enough data to calculate ATR", level="WARNING")
+            return
+
         atr = tr.rolling(self.atr_period).mean()
-        atr_mean = atr.rolling(self.atr_mean_window).mean()
-        df['ATR'], df['ATR_mean'] = atr, atr_mean
+        df['TR'], df['ATR'] = tr, atr
 
         df = df.dropna()
         if df.empty:
@@ -166,7 +165,7 @@ class USDTGridStrategy:
     def place_initial_orders(self) -> None:
         for price in self.grid_prices:
             qty = round(self.order_size_usdt / price, 6)
-            
+
             if self.mode == "live" and self.exchange_sync:
                 if price < self.center_price:
                     self.exchange_sync.place_limit_buy(self.symbol, price, qty)
@@ -321,14 +320,6 @@ class USDTGridStrategy:
             self.realized_hedge_profit += pnl
             self.hedge_active = False
             self.logger.log(f"HEDGE CLOSE qty={self.hedge_qty}@{price}, PnL={pnl}", level="INFO")
-
-    def calculate_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
-        tr = pd.concat([
-            df['High'] - df['Low'],
-            (df['High'] - df['Close'].shift()).abs(),
-            (df['Low'] - df['Close'].shift()).abs()
-        ], axis=1).max(axis=1)
-        return tr.rolling(period).mean()
 
     def get_summary(self) -> Dict:
         return {

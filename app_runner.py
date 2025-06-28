@@ -13,9 +13,9 @@ def main():
     symbol  = CONFIG['symbol']
     mode    = CONFIG['mode']
 
+    spot, futures = create_exchanges(CONFIG['binance_api_key'], CONFIG['binance_api_secret'], CONFIG['binance_testnet'])
+
     if mode == 'live':
-        spot, futures = create_exchanges(
-                            CONFIG['binance_api_key'], CONFIG['binance_api_secret'], CONFIG['binance_testnet'])
         spot_fee = float(spot.fetch_trading_fee(symbol)['maker'])
         futures_fee = 0.004
     else:
