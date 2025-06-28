@@ -18,10 +18,14 @@ class GridStateDB:
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS grid_state (
-                grid_price   REAL      PRIMARY KEY,
-                status       TEXT      NOT NULL DEFAULT 'open',
-                create_date  DATETIME  NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-                update_date  DATETIME  NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+                id            INTEGER   PRIMARY KEY AUTOINCREMENT,
+                grid_price    REAL      NOT NULL,
+                use_status    TEXT      NOT NULL DEFAULT 'N',
+                groud_id      TEXT      NOT NULL,
+                base_price    REAL      NOT NULL DEFAULT 0.0,
+                spacing       REAL      NOT NULL DEFAULT 0.0,
+                create_date   DATETIME  NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+                update_date   DATETIME  NOT NULL DEFAULT (CURRENT_TIMESTAMP)
             )
             """
         )
@@ -32,12 +36,12 @@ class GridStateDB:
     def load_state(self) -> Dict[float, str]:
         """
         Load grid entries that are not cancelled.
-        Returns a dict mapping price to its status ('open' or 'filled').
+        Returns a dict mapping price to its status ('Y' or 'N').
         """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT grid_price, status FROM grid_state WHERE status!='cancelled'"
+            "SELECT grid_price, status FROM grid_state WHERE use_status != 'N'"
         )
         rows = cursor.fetchall()
         conn.close()
@@ -51,16 +55,17 @@ class GridStateDB:
         """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        for price, status in state.items():
+        for price, status, groudId in state.items():
             cursor.execute(
                 """
-                INSERT INTO grid_state (grid_price, status)
-                VALUES (?, ?)
+                INSERT INTO grid_state (grid_price, groud_id, use_status)
+                VALUES (?, ?, ?)
                 ON CONFLICT(grid_price) DO UPDATE
-                  SET status      = 'open',
-                      update_date = CURRENT_TIMESTAMP
+                  SET use_status      = excluded.use_status,
+                      groud_id        = excluded.groud_id,
+                      update_date     = CURRENT_TIMESTAMP
                 """,
-                (price, status)
+                (price, status, groudId)
             )
         conn.commit()
         conn.close()
@@ -71,7 +76,7 @@ class GridStateDB:
         cursor.execute(
             """
             UPDATE grid_state
-               SET status      = 'filled',
+               SET status      = 'close',
                    update_date = CURRENT_TIMESTAMP
              WHERE grid_price = ?
             """, (price)

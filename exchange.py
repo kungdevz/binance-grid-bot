@@ -41,6 +41,9 @@ class ExchangeSync:
 
     def place_limit_buy(self, symbol: str, price: float, qty: float) -> Any:
         return self.spot.create_order(symbol, 'limit', 'buy', qty, price)
+    
+    def place_limit_sell(self, symbol: str, price: float, qty: float) -> Any:
+        return self.spot.create_order(symbol, 'limit', 'sell', qty, price)
 
     def place_market_order(self, symbol: str, side: str, qty: float) -> Any:
         return self.spot.create_order(symbol, 'market', side, qty)

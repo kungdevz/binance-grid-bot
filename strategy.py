@@ -2,10 +2,13 @@ from collections import deque
 import os
 import pandas as pd
 import numpy as np
+import utils
 from typing import Any, Dict, List, Tuple, Optional
 from database.future_orders_db import FuturesOrdersDB
 from database.grid_states_db import GridStateDB
 from database.spot_orders_db import SpotOrdersDB
+
+from exchange import create_exchanges, ExchangeSync
 
 from exchange import ExchangeSync
 from logger import Logger
@@ -13,18 +16,21 @@ from logger import Logger
 class USDTGridStrategy:
     def __init__(
         self,
+        symbol: str,
+        db: Any,
         initial_capital: float = 10000,
         mode: str = "forward_test",
         db_path: str = "grid_state.db",
+        atr_period: int = 14,
+        atr_mean_window: int = 100,
         spot_fee: float = 0.001,
         futures_fee: float = 0.0004,
         reserve_ratio: float = 0.3,
         order_size_usdt: float = 500,
         hedge_size_ratio: float = 0.5,
         grid_state_enabled: bool = True,
-        atr_period: int = 14,
-        atr_mean_window: int = 100,
-        enivronment: str = "development"
+        ema_periods: Dict[str, int] = None,
+        enivronment: str = "development",
     ):
         self.initial_capital = initial_capital
         self.mode = mode
@@ -34,32 +40,28 @@ class USDTGridStrategy:
         self.futures_fee = futures_fee
         self.hedge_size_ratio = hedge_size_ratio
         self.grid_state_enabled = grid_state_enabled
+        self.db_path = db_path
 
         # ATR settings
         self.atr_period = atr_period
         self.atr_mean_window = atr_mean_window
         
-        # Deques for streaming ATR & ATR_mean
-        self.tr_history = deque(maxlen=self.atr_period)       # to compute ATR
-        self.atr_history = deque(maxlen=self.atr_mean_window) # to compute ATR_mean
-        self.prev_close: Optional[float] = None
+        self.symbol = symbol
+        self.atr_period = atr_period
+        self.ema_periods = ema_periods or {
+            'ema_14': 14,
+            'ema_28': 28,
+            'ema_50': 50,
+            'ema_100': 100,
+            'ema_200': 200
+        }
 
         # setup logger
         self.logger = Logger(env=enivronment, db_path=db_path)
         self.logger.log(f"Initializing strategy in {enivronment} mode", level="DEBUG")
-
-        # persistence & exchange placeholders
-        self.db: Optional[GridStateDB] = None
-        self.exchange_sync: Optional[ExchangeSync] = None
-        if self.mode == "forward_test":
-            self.db = GridStateDB(db_path)
-            self.logger.log(f"GridStateDB initialized at {db_path}", level="DEBUG")
-        else:
-            self.db = None
-        # runtime state
         self.reset()
 
-    def set_exchanges(self, spot: Any, futures: Any, symbol: str):
+    def set_exchanges(self, spot: Any, futures: Any, symbol: str, mode: str = "forward_test"):
         self.spot = spot
         self.futures = futures
         self.symbol = symbol
@@ -78,10 +80,26 @@ class USDTGridStrategy:
         self.hedge_active = False
         self.hedge_entry_price = 0.0
         self.hedge_qty = 0.0
-        self.tr_history.clear()
-        self.atr_history.clear()
         self.prev_close = None
         self.logger.log("Strategy state reset", level="DEBUG")
+    
+    def run_from_file(self, file_path: str) -> Dict[str, Any]:
+        """
+        Read OHLCV CSV and execute backtest.
+        CSV must have columns: Time, Open, High, Low, Close, Volume
+        """
+        df = pd.read_csv(file_path, parse_dates=['Time'])
+        df.rename(columns={'Time':'time','Open':'Open','High':'High','Low':'Low','Close':'Close','Volume':'Volume'}, inplace=True)
+        df.set_index('time', inplace=True)
+
+        # Bootstrap and process each candle 
+        self.bootstrap(df)
+        for idx, row in df.iterrows():
+            # convert pandas Timestamp to epoch ms
+            ts = int(idx.value // 10**6)
+            self.on_candle(ts, float(row['Open']), float(row['High']), float(row['Low']), float(row['Close']), float(row['Volume']))
+        return self.get_summary()
+
 
     def load_grid_state(self):
         if self.mode == "forward_test" and self.db:
@@ -92,17 +110,9 @@ class USDTGridStrategy:
             self.logger.log("Synced grid state from exchange", level="DEBUG")
         else:
             self.grid_state = {}
-            self.logger.log("Initialized empty grid state", level="DEBUG")
-
-    def save_grid_state(self):
-        if self.mode == "forward_test" and self.db:
-            self.db.save_state(self.grid_state)
-            self.logger.log("Saved grid state to SQLite", level="DEBUG")
+            self.logger.log("Initialized empty grid state", level="DEBUG")        
 
     def initialize_grid(self, base_price: float, spacing: float, levels: int = 10):
-
-        if self.db:
-           self.db.cancel_open()
         
         self.center_price = base_price
         self.spacing      = spacing
@@ -111,10 +121,19 @@ class USDTGridStrategy:
         upper = [float(round(base_price + spacing * i, 2)) for i in range(1, levels+1)]
 
         self.grid_prices = lower + upper
-
-        self.grid_initialized = True
-        self.grid_state = {p: 'open' for p in self.grid_prices}
+        
         self.logger.log(f"Grid initialized with prices: {self.grid_prices}, Center price: {self.center_price}, Spacing: {spacing}", level="INFO")
+
+        group_id = utils.generate_order_id('INIT')
+        for price in self.grid_prices:
+            db = GridStateDB(db_path=self.db_path)
+            items = {
+                'grid_price': price,
+                'use_status': 'Y',
+                'groud_id': group_id
+            }
+            db.save_state(items)
+            self.logger.log("Saved grid state to SQLite", level="DEBUG")
 
     def bootstrap(self, history: pd.DataFrame):
         df = history.copy()
@@ -134,11 +153,7 @@ class USDTGridStrategy:
         if df.empty:
             self.logger.log("Not enough history to bootstrap", level="WARNING")
             return
-
-        # fill deques
-        self.tr_history.extend(tr.iloc[-self.atr_period:].tolist())
-        self.atr_history.extend(atr.iloc[-self.atr_mean_window:].tolist())
-
+        
         # track prev_close for first streaming candle
         self.prev_close = df['Close'].iloc[-1]
 
@@ -151,6 +166,7 @@ class USDTGridStrategy:
     def place_initial_orders(self) -> None:
         for price in self.grid_prices:
             qty = round(self.order_size_usdt / price, 6)
+            
             if self.mode == "live" and self.exchange_sync:
                 if price < self.center_price:
                     self.exchange_sync.place_limit_buy(self.symbol, price, qty)
@@ -161,38 +177,61 @@ class USDTGridStrategy:
                 self.grid_state[price] = 'open'
             elif self.mode == "forward_test":
                 if price < self.center_price:
-                    qty = round(self.order_size_usdt / price, 6)
                     self.positions.append((qty, price, round(price + self.spacing, 2), self.spacing))
                     self.logger.log(f"Simulated open buy {qty}@{price}", level="INFO")
-                    self.db.mark_open(price)
-                    self.grid_state[price] = 'open'
                 if price > self.center_price:
-                    qty = round(self.order_size_usdt / price, 6)
                     self.positions.append((qty, price, round(price + self.spacing, 2), self.spacing))
                     self.logger.log(f"Simulated open sell {qty}@{price}", level="INFO")
-                    self.db.mark_open(price)
-                    self.grid_state[price] = 'open'
 
-        if self.mode == "forward_test":
-            self.save_grid_state()
+    def on_candle(self, timestamp: int, open: float, high: float, low: float, close: float, volume: float) -> None:
+        prev_df = self.db.get_recent_ohlcv(self.symbol, 1)
+        if not prev_df.empty:
+            prev_close = prev_df['close'].iloc[-1]
+            prev_emas = {name: prev_df[name].iloc[-1] for name in self.ema_periods}
+        else:
+            prev_close = close
+            prev_emas = {name: None for name in self.ema_periods}
 
-    def on_candle(self, open: float, high: float, low: float, close: float, volumn: float) -> None:
-        # คำนวณ True Range จากแท่งนี้
-        tr = self._calc_tr_single(high, low, close)
+        # คำนวณ TR และ ATR
+        tr = self._calc_tr_single(high, low, prev_close)
+        hist = self.db.get_recent_ohlcv(self.symbol, self.atr_period)['tr'].tolist()
+        tr_list = (hist + [tr])[-self.atr_period:]
+        atr_value = float(np.mean(tr_list))
+        atr_mean = float(np.mean(tr_list))
 
-        # คำนวณ ATR & ATR_mean จาก deque
-        self.tr_history.append(tr)
-        atr = float(np.mean(self.tr_history))
-        self.atr_history.append(atr)
-        atr_mean = float(np.mean(self.atr_history))
+        # คำนวณ EMA แต่ละช่วง
+        emas: Dict[str, float] = {}
+        for name, period in self.ema_periods.items():
+            alpha = 2 / (period + 1)
+            prev = prev_emas.get(name)
+            emas[name] = float(close if prev is None else alpha * close + (1 - alpha) * prev)
 
-        # 4) สร้าง pd.Series สำหรับใช้กับ _process_tick
+        # บันทึกลงฐานข้อมูล
+        self.db.insert_ohlcv_data(
+            self.symbol,
+            timestamp,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            tr,
+            atr_value,
+            emas['ema_14'],
+            emas['ema_28'],
+            emas['ema_50'],
+            emas['ema_100'],
+            emas['ema_200']
+        )
+
+        # เตรียม row สำหรับ grid/hedge logic
         row = pd.Series({
+            'timestamp': timestamp,
             'Close': close,
-            'ATR':   atr,
-            'ATR_mean': atr_mean
-        })
-
+            'ATR': atr_value,
+            'ATR_mean': atr_mean,
+            **emas
+        }, name=timestamp)
         # 5) ส่งต่อให้ logic หลักทำงาน
         self._process_tick(row)
 
@@ -243,9 +282,6 @@ class USDTGridStrategy:
         if self.exchange_sync and self.mode == "live":
             self.exchange_sync.place_limit_buy(self.symbol, price, qty)
             self.logger.log(f"Placed live limit buy for Grid Buy Price={price}, Targe Price={target}, Qty={qty}, Fee={fee}", level="INFO")
-        
-        if self.db:
-           self.db.save_state(self.grid_state)
 
     def _check_sell(self, timestamp, price: float) -> None:
         new_positions = []

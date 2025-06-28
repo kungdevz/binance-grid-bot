@@ -20,7 +20,7 @@ def generate_order_id(action: OrderAction) -> str:
     """
     global _sequence
     # Validate action
-    allowed = {'BUY', 'SELL', 'HEDGE_OPEN', 'HEDGE_CLOSE'}
+    allowed = {'BUY', 'SELL', 'HEDGE_OPEN', 'HEDGE_CLOSE', 'INIT'}
     if action not in allowed:
         raise ValueError(f"Invalid action '{action}'. Must be one of {allowed}.")
 
