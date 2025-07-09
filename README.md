@@ -24,32 +24,63 @@
 
 ---
 
-## 🧩 Parameters (ค่าเริ่มต้นที่แนะนำ)
+## 🔄 Work Flow
 
-| หมวดหมู่ | Parameter | ค่าตัวอย่าง / วิธีคำนวณ |
-| --- | --- | --- |
-| Grid | `grid_levels` | 5 ระดับ |
-|  | `grid_spacing` | `ATR × multiplier` |
-|  | `ATR_multiplier` | 2.0 (เมื่อ ATR > ค่าเฉลี่ย), 1.0 ปกติ |
-|  | `order_size_usdt` | $500 ต่อไม้ |
-| Hedge | `hedge_trigger` | ราคา < Lowest Grid − ATR |
-|  | `hedge_size_ratio` | 50% ของ BNB ที่ถืออยู่ |
-|  | `hedge_leverage` | 2x |
-|  | `hedge_close_trigger` | ราคา > Hedge Entry + ATR |
-| Capital | `initial_capital` | สำหรับ Backtest / Forword Test ทำเป็นตัวแปร <br> สำหรับ Live ดึงจาก API ของ CCTX Binance |
-|  | `reserve_ratio` | 30% ของทุน ถือเป็นเงินสด |
-| Fee | `spot_fee` | สำหรับ Backtest / Forword Test ทำเป็นตัวแปร <br> สำหรับ Live ดึงจาก API ของ CCTX Binance |
-|  | `futures_fee` | สำหรับ Backtest / Forword Test ทำเป็นตัวแปร <br> สำหรับ Live ดึงจาก API ของ CCTX Binance |
-|  | `funding_rate` | สำหรับ Backtest / Forword Test ทำเป็นตัวแปร 
-สำหรับ Live ดึงจาก API ของ CCTX Binance |
-
----
-
-## 🔄 เวิร์กโฟลว์โดยย่อ (แบบ Live)
-
-1. ✅ **รับแท่งราคาจาก WebSocket (1h)**
-2. ✅ คำนวณ ATR และ ATR Mean จากข้อมูลสะสม
-3. ✅ ถ้ายังไม่เคยวาง Grid → Init Grid ตามราคาและ Spacing
-4. 🟢 ถ้าราคาต่ำกว่า Grid → ซื้อ Spot ที่ราคานั้น
-5. 🧯 ป้องกัน ราคาหลุด Lowest Grid → เปิด Short Hedge ( คำนวน TP/SL ) ทุกครั้ง
-6. 💾 ทุกคำสั่งจะถูกบันทึกใน SQLite เพื่อ Track / Back test
+```
+START (check configuration in .env (forward test or live)
+│
+├─> Initialize parameters, reserve ratio and grid levels is from .env then get captical
+|   ├─> forward test mode, Get a capital it from .env file
+|   ├─> Live mode, Get a capital (Account balance) from exchange
+│
+├─> Run in live mode, Connect exchanges (spot, futures) using API keys
+|   ├─> Get Spot fee
+|   ├─> Get Future fee
+|   |─> Check Balance in account then update to 
+|   |─> Check current spot postion (open and fill) then update status to spot_orders table (spot_orders.py)
+|   └─> Check current future postion at Exchange then update status (Open and filled) to futures_orders table (futures_orders.py)
+├─> Run in forward test mode all value in .env file.
+|   ├─> Get Spot fee (.env file)
+|   ├─> Get Future fee (.env file)
+|   ├─> Check Balance in account (account_balance.py)
+|   └─> Check current future postion (open and fill) then update status to futures_orders table (futures_orders.py)
+│
+├─> Fetch historical candles, forward test read from OHCLV file, live connect to exchange (last 30 Days).
+│     ├─> Calculate TR and ATR(14)
+│     ├─> Calculate multiplier from TR and ATR
+│     ├─> Calculate initial grid spacing: ATR * multiplier
+│     └─> Create initial grid prices (above & below base price)
+│
+├─> Place initial limit orders (simulate if forward test, real if live) 
+│
+├─> Start real-time price stream (websocket)
+│
+├─> LOOP: On new candle
+│     ├─> Update ATR, ATR
+│     ├─> Check if grid needs to adjust spacing (optional dynamic adjust)
+│     ├─> Process buys:
+│     │     ├─> If price <= grid level and not yet filled
+│     │     │     ├─> Execute buy
+│     │     │     ├─> Allocate USDT
+│     │     │     └─> Update grid state, mark as filled
+│     │     └─> Update positions
+│     │
+│     ├─> Process sells:
+│     │     ├─> If price >= target price
+│     │     │     ├─> Execute sell
+│     │     │     ├─> Return USDT
+│     │     │     ├─> Add realized profit
+│     │     │     └─> Update grid state, mark as unfilled
+│     │
+│     ├─> Hedge logic:
+│     │     ├─> If price < lowest grid - ATR and not hedged
+│     │     │     ├─> Open short (hedge), size = % of spot position
+│     │     │     └─> Mark hedge active
+│     │     ├─> If price > hedge entry + ATR and hedge active
+│     │     │     ├─> Close short (hedge)
+│     │     │     └─> Add realized hedge profit
+│     │
+│     └─> Save updated state to DB (SQLite)
+│
+└─> END LOOP (runs until stopped)
+```

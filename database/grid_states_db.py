@@ -24,9 +24,15 @@ class GridStateDB:
                 groud_id      TEXT      NOT NULL,
                 base_price    REAL      NOT NULL DEFAULT 0.0,
                 spacing       REAL      NOT NULL DEFAULT 0.0,
-                create_date   DATETIME  NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-                update_date   DATETIME  NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+                create_date   DATETIME  NULL DEFAULT CURRENT_TIMESTAMP,
+                update_date   DATETIME  NULL DEFAULT CURRENT_TIMESTAMP
             )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_grid_group_price ON grid_state(id, groud_id, grid_price);
             """
         )
 
@@ -47,7 +53,7 @@ class GridStateDB:
         conn.close()
         return {price: status for price, status in rows}
 
-    def save_state(self, state: Dict[float, str]) -> None:
+    def save_state(self, entry: dict) -> None:
         """
         Upsert grid entries:
         - New entries are inserted with status as given.
@@ -55,18 +61,18 @@ class GridStateDB:
         """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        for price, status, groudId in state.items():
-            cursor.execute(
-                """
-                INSERT INTO grid_state (grid_price, groud_id, use_status)
-                VALUES (?, ?, ?)
-                ON CONFLICT(grid_price) DO UPDATE
-                  SET use_status      = excluded.use_status,
-                      groud_id        = excluded.groud_id,
-                      update_date     = CURRENT_TIMESTAMP
-                """,
-                (price, status, groudId)
-            )
+        cursor.execute(
+            """
+                INSERT INTO grid_state (grid_price, use_status, groud_id, base_price, spacing, create_date)
+                    VALUES (:grid_price, :use_status, :groud_id, :base_price, :spacing, :create_date)
+                    ON CONFLICT(groud_id, grid_price) DO UPDATE SET
+                    use_status   = excluded.use_status,
+                    base_price   = excluded.base_price,
+                    spacing      = excluded.spacing,
+                    create_date  = excluded.create_date
+            """,
+            entry
+        )
         conn.commit()
         conn.close()
 

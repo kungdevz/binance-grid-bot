@@ -18,6 +18,7 @@ class SpotOrdersDB:
             id                   INTEGER PRIMARY KEY AUTOINCREMENT,
             order_id             INTEGER NOT NULL UNIQUE,
             client_order_id      TEXT,
+            grid_id              REAL    NOT NULL,
             symbol               TEXT    NOT NULL,
             status               TEXT    NOT NULL,
             type                 TEXT    NOT NULL,

@@ -4,9 +4,11 @@ import pandas as pd
 import numpy as np
 import utils.utils as ut
 from typing import Any, Dict, List, Tuple, Optional
+
 from database.future_orders_db import FuturesOrdersDB
 from database.grid_states_db import GridStateDB
 from database.spot_orders_db import SpotOrdersDB
+from database.account_balance import AccountBalanceDB
 
 from exchange import create_exchanges, ExchangeSync
 
@@ -15,38 +17,18 @@ from logger import Logger
 
 class USDTGridStrategy:
     def __init__(
-        self,
+         self,
         symbol: str,
-        initial_capital: float = 10000,
-        mode: str = "forward_test",
-        db_path: str = "grid_state.db",
+        db_path: str = "database/schema/backtest_bot.db",
         atr_period: int = 14,
         atr_mean_window: int = 100,
-        spot_fee: float = 0.001,
-        futures_fee: float = 0.0004,
-        reserve_ratio: float = 0.3,
-        order_size_usdt: float = 500,
-        hedge_size_ratio: float = 0.5,
-        grid_state_enabled: bool = True,
         ema_periods: Dict[str, int] = None,
-        enivronment: str = "development",
     ):
-        self.initial_capital = initial_capital
-        self.mode = mode
-        self.reserve_ratio = reserve_ratio
-        self.order_size_usdt = order_size_usdt
-        self.spot_fee = spot_fee
-        self.futures_fee = futures_fee
-        self.hedge_size_ratio = hedge_size_ratio
-        self.grid_state_enabled = grid_state_enabled
+        # Basic configuration from .env
+        self.symbol = symbol
         self.db_path = db_path
-
-        # ATR settings
         self.atr_period = atr_period
         self.atr_mean_window = atr_mean_window
-        
-        self.symbol = symbol
-        self.atr_period = atr_period
         self.ema_periods = ema_periods or {
             'ema_14': 14,
             'ema_28': 28,
@@ -55,10 +37,93 @@ class USDTGridStrategy:
             'ema_200': 200
         }
 
-        # setup logger
-        self.logger = Logger(env=enivronment, db_path=db_path)
-        self.logger.log(f"Initializing strategy in {enivronment} mode", level="DEBUG")
+         # Mode and grid parameters
+        self.mode = os.getenv("mode", "forward_test")                     # "forward_test" or "live"
+        self.reserve_ratio = float(os.getenv("reserve_ratio", 0.3))       # Portion of capital reserved
+        self.grid_levels = int(os.getenv("grid_levels", 5))               # Number of grid levels
+
+        # Fees and initial capital will be loaded per mode
+        self.spot_fee = 0.0
+        self.futures_fee = 0.0
+        self.initial_capital = 0.0
+
+        # Logger
+        self.logger = Logger(env=os.getenv("ENVIRONMENT", "development"), db_path=self.db_path)
+        self.logger.log(f"Initializing strategy in {self.mode} mode", level="DEBUG")
+
+        # Initialize databases
+        self.spot_db = SpotOrdersDB(self.db_path)
+        self.futures_db = FuturesOrdersDB(self.db_path)
+        self.balance_db = AccountBalanceDB(self.db_path)
+        self.grid_db = GridStateDB(self.db_path)
+
+         # Initialize capital, exchanges, fees, balances, and positions
+        self._init_capital_and_fees()
+        if self.mode == "live":
+            self._init_live_mode()
+        else:
+            self._init_forward_mode()
+
+        # Common state reset
         self.reset()
+
+    def _init_capital_and_fees(self):
+        if self.mode == "forward_test":
+            # Load test parameters from .env
+            self.initial_capital = float(os.getenv("INITIAL_CAPITAL", 10000))
+            self.spot_fee       = float(os.getenv("SPOT_FEE", 0.001))
+            self.futures_fee    = float(os.getenv("FUTURES_FEE", 0.0004))
+        else:
+            # Live: we'll fetch capital and fees from the exchange
+            self.initial_capital = None  # will set after fetching balance
+
+    def _init_live_mode(self):
+        # Connect to exchanges
+        api_key    = os.getenv("API_KEY")
+        api_secret = os.getenv("API_SECRET")
+        spot, futures = create_exchanges(api_key, api_secret)
+        self.set_exchanges(spot, futures, self.symbol, mode="live")
+
+        # Fetch fees from exchange
+        self.spot_fee    = self.spot.get_trade_fee()
+        self.futures_fee = self.futures.get_trade_fee()
+
+        # Sync account balance
+        balance = self.spot.get_account_balance(asset="USDT")
+        self.initial_capital = balance.total  # total USDT balance
+        self.logger.log(f"Live USDT balance fetched: {self.initial_capital}", level="INFO")
+        # Persist balance record
+        self.balance_db.insert_balance(
+            record_date=pd.Timestamp.now().date(),
+            record_time=pd.Timestamp.now().time(),
+            start_balance_usdt=self.initial_capital,
+            end_balance_usdt=self.initial_capital,
+            notes="Initial live balance"
+        )
+
+        # Sync open spot orders
+        open_spots = self.spot.get_open_orders(self.symbol)
+        for o in open_spots:
+            self.spot_db.create_order(o)
+        self.logger.log(f"Synchronized {len(open_spots)} live spot orders", level="INFO")
+
+        # Sync open futures positions
+        open_futs = self.futures.get_open_orders(self.symbol)
+        for f in open_futs:
+            self.futures_db.create_order(f)
+        self.logger.log(f"Synchronized {len(open_futs)} live futures orders", level="INFO")
+
+    def _init_forward_mode(self):
+        # Forward-test: initial capital already set, record it
+        self.logger.log(f"Forward-test capital: {self.initial_capital}", level="INFO")
+        self.data_file_path = os.getenv("data_file_path", "load_data_backtest/data/BTCUSDT_1D.csv")
+        self.balance_db.insert_balance(
+            record_date=pd.Timestamp.now().date(),
+            record_time=pd.Timestamp.now().time(),
+            start_balance_usdt=self.initial_capital,
+            end_balance_usdt=self.initial_capital,
+            notes="Initial forward-test balance"
+        )
 
     def set_exchanges(self, spot: Any, futures: Any, symbol: str, mode: str = "forward_test"):
         self.spot = spot
@@ -77,6 +142,7 @@ class USDTGridStrategy:
         self.hedge_entry_price = 0.0
         self.hedge_qty = 0.0
         self.prev_close = None
+        self.data_file_path = None
         self.logger.log("Strategy state reset", level="DEBUG")
     
     def run_from_file(self, file_path: str) -> Dict[str, Any]:
@@ -125,10 +191,14 @@ class USDTGridStrategy:
             items = {
                 'grid_price': price,
                 'use_status': 'Y',
-                'groud_id': group_id
+                'groud_id': group_id,
+                'base_price': float(self.center_price),
+                'spacing': float(self.spacing),
+                'create_date': pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
             db.save_state(items)
-            self.logger.log("Saved grid state to SQLite", level="DEBUG")
+        
+        self.logger.log("Saved grid state to SQLite", level="DEBUG")
 
     def bootstrap(self, history: pd.DataFrame):
         df = history.copy()
@@ -139,33 +209,21 @@ class USDTGridStrategy:
             (df['Low']  - df['Close'].shift()).abs()
         ], axis=1).max(axis=1)
 
-        # 2. Rolling TR & ATR
-        _calc_tr_single = self._calc_tr_single
-        if len(df) < self.atr_period:
-            self.logger.log("Not enough data to calculate ATR", level="WARNING")
-            return
-
         atr = tr.rolling(self.atr_period).mean()
         df['TR'], df['ATR'] = tr, atr
-
-        df = df.dropna()
-        if df.empty:
-            self.logger.log("Not enough history to bootstrap", level="WARNING")
-            return
         
         # track prev_close for first streaming candle
         self.prev_close = df['Close'].iloc[-1]
 
         # use last row to init grid
         last = df.iloc[-1]
-        spacing = last['ATR'] * (2.0 if last['ATR'] > last['ATR_mean'] else 1.0)
+        spacing = last['TR'] * (2.0 if last['TR'] > last['ATR'] else 1.0)
         self.initialize_grid(last['Close'], spacing)
         self.place_initial_orders(self)
 
     def place_initial_orders(self) -> None:
         for price in self.grid_prices:
             qty = round(self.order_size_usdt / price, 6)
-
             if self.mode == "live" and self.exchange_sync:
                 if price < self.center_price:
                     self.exchange_sync.place_limit_buy(self.symbol, price, qty)
