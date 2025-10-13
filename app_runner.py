@@ -7,32 +7,16 @@ from exchange import create_exchanges, ExchangeSync
 from strategy import USDTGridStrategy
 from config import CONFIG
 
-def main():
+async def main():
 
-    capital = CONFIG['initial_capital']
-    symbol  = CONFIG['symbol']
-    mode    = CONFIG['mode']
-
-    spot, futures = create_exchanges(CONFIG['binance_api_key'], CONFIG['binance_api_secret'], CONFIG['binance_testnet'])
-
-    if mode == 'live':
-        spot_fee = float(spot.fetch_trading_fee(symbol)['maker'])
-        futures_fee = 0.004
-    else:
-        spot_fee = 0.1
-        futures_fee = 0.004
+    mode = CONFIG['mode']
+    symbol = CONFIG['symbol']
 
     bot = USDTGridStrategy(
-        mode=mode,
         symbol=symbol,
-        spot_fee=spot_fee,
-        futures_fee=futures_fee,
-        initial_capital=capital,
-        reserve_ratio=CONFIG['reserve_ratio'],
-        order_size_usdt=CONFIG['order_size_usdt'],
-        hedge_size_ratio=CONFIG['hedge_size_ratio'],
-        enivronment=CONFIG['environment'],
+        db_path=CONFIG['db_path'],
         atr_period=CONFIG['atr_period'],
+        atr_mean_window=CONFIG['atr_mean_window'],
         ema_periods=CONFIG['ema_periods']
     )
 
@@ -40,15 +24,11 @@ def main():
 
     if mode == 'forward_test':
         print('✅ Bot initialized for backtest mode')
-        file_path = CONFIG.get('ohlcv_file') or os.getenv('OHLCV_FILE')
-        if not file_path:
+        file_path = CONFIG['ohlcv_file']
+        if os.path.exists(file_path):
             raise ValueError('OHLCV_FILE must be set in env or config for backtest')
-        summary = bot.run_from_file(file_path)
-        print("===== Backtest Summary =====")
-        for k, v in summary.items():
-            print(f"{k}: {v}")
+        bot.run_from_file(file_path)
     else:
-        
         api_key = CONFIG['binance_api_key']
         api_secret = CONFIG['binance_api_secret']
         testnet = CONFIG.get('binance_testnet', False)
@@ -65,18 +45,31 @@ def main():
         bot.bootstrap(df)
         print('✅ Bot initialized for live mode')
 
-        async def live_loop():
-            uri = f"wss://stream.binance.com:9443/ws/{CONFIG['ws_symbol']}@kline_{CONFIG['ws_timeframe']}"
+    ws_symbol = CONFIG['ws_symbol'].replace("/", "").lower()
+    uri = f"wss://stream.binance.com:9443/ws/{ws_symbol}@kline_{CONFIG['ws_timeframe']}"
+    await connect_and_listen(uri, bot)
+
+async def connect_and_listen(uri, strat):
+    """
+    Connect to the WS URI, listen for messages, 
+    dispatch closed 1h candles to strat.on_candle().
+    Reconnects automatically on drop.
+    """
+    while True:
+        try:
             async with websockets.connect(uri) as ws:
-                while True:
-                    data = json.loads(await ws.recv())
-                    k = data['k']
-                    if k['x']:
-                        bot.on_candle(
-                            int(k['t']),
-                            float(k['o']), float(k['h']), float(k['l']), float(k['c']), float(k['v'])
-                        )
-        asyncio.run(live_loop())
+                print(f"Connected to {uri}")
+                async for message in ws:
+                    data = json.loads(message)
+                    k = data.get("k", {})
+                    if k.get("x"): # candle is closed
+                        ts = k["T"]            # close time (ms)
+                        o, h, l, c = map(float, (k["o"], k["h"], k["l"], k["c"]))
+                        v = float(k["v"])
+                        strat.on_candle(ts, o, h, l, c, v)
+        except Exception as e:
+            print(f"WebSocket error: {e}. Reconnecting in 5s…")
+            await asyncio.sleep(5)
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())

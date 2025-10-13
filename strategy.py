@@ -1,9 +1,9 @@
-from collections import deque
 import os
 import pandas as pd
 import numpy as np
 import utils.utils as ut
 from typing import Any, Dict, List, Tuple, Optional
+from datetime import datetime, timedelta
 
 from database.future_orders_db import FuturesOrdersDB
 from database.grid_states_db import GridStateDB
@@ -73,6 +73,7 @@ class USDTGridStrategy:
             self.initial_capital = float(os.getenv("INITIAL_CAPITAL", 10000))
             self.spot_fee       = float(os.getenv("SPOT_FEE", 0.001))
             self.futures_fee    = float(os.getenv("FUTURES_FEE", 0.0004))
+            self.reserve_capital = self.initial_capital * self.reserve_ratio
         else:
             # Live: we'll fetch capital and fees from the exchange
             self.initial_capital = None  # will set after fetching balance
@@ -93,13 +94,13 @@ class USDTGridStrategy:
         self.initial_capital = balance.total  # total USDT balance
         self.logger.log(f"Live USDT balance fetched: {self.initial_capital}", level="INFO")
         # Persist balance record
-        self.balance_db.insert_balance(
-            record_date=pd.Timestamp.now().date(),
-            record_time=pd.Timestamp.now().time(),
-            start_balance_usdt=self.initial_capital,
-            end_balance_usdt=self.initial_capital,
-            notes="Initial live balance"
-        )
+        self.balance_db.insert_balance({
+            "record_date": datetime.now().date(),
+            "record_time": datetime.timestamp(datetime.now()),
+            "start_balance_usdt":self.initial_capital,
+            "end_balance_usdt": self.initial_capital,
+            "notes": "Initial live balance"
+        })
 
         # Sync open spot orders
         open_spots = self.spot.get_open_orders(self.symbol)
@@ -116,20 +117,25 @@ class USDTGridStrategy:
     def _init_forward_mode(self):
         # Forward-test: initial capital already set, record it
         self.logger.log(f"Forward-test capital: {self.initial_capital}", level="INFO")
-        self.data_file_path = os.getenv("data_file_path", "load_data_backtest/data/BTCUSDT_1D.csv")
-        self.balance_db.insert_balance(
-            record_date=pd.Timestamp.now().date(),
-            record_time=pd.Timestamp.now().time(),
-            start_balance_usdt=self.initial_capital,
-            end_balance_usdt=self.initial_capital,
-            notes="Initial forward-test balance"
-        )
+        self.reserve_capital = self.initial_capital * self.reserve_ratio
+        self.logger.log(f"Reserve capital set to {self.reserve_capital}", level="DEBUG")
+        self.order_size_usdt = (self.initial_capital - self.reserve_capital) / self.grid_levels
+        self.logger.log(f"Order size set to {self.order_size_usdt} USDT", level="DEBUG")
+        self.set_exchanges(None, None, self.symbol)
+        self.balance_db.insert_balance({
+            "record_date": datetime.now().date(),
+            "record_time": datetime.timestamp(datetime.now()),
+            "start_balance_usdt":self.initial_capital,
+            "end_balance_usdt": self.initial_capital,
+            "notes" : "Initial forward-test balance" 
+        })
 
     def set_exchanges(self, spot: Any, futures: Any, symbol: str, mode: str = "forward_test"):
         self.spot = spot
         self.futures = futures
         self.symbol = symbol
-        self.exchange_sync = ExchangeSync(spot, symbol)
+        self.symbol_futures = symbol.replace("/", "") # e.g. BTC/USDT -> BTCUSDT
+        self.exchange_sync = ExchangeSync(spot, symbol, mode)
         self.logger.log(f"Exchanges set for symbol {symbol}", level="DEBUG")
 
     def reset(self):
@@ -174,7 +180,7 @@ class USDTGridStrategy:
             self.grid_state = {}
             self.logger.log("Initialized empty grid state", level="DEBUG")        
 
-    def initialize_grid(self, base_price: float, spacing: float, levels: int = 10):
+    def initialize_grid(self, base_price: float, spacing: float, levels: int = 10) -> str :
         
         self.center_price = base_price
         self.spacing      = spacing
@@ -182,7 +188,7 @@ class USDTGridStrategy:
         lower = [float(round(base_price - spacing * i, 2)) for i in range(1, levels+1)]
         upper = [float(round(base_price + spacing * i, 2)) for i in range(1, levels+1)]
 
-        self.grid_prices = lower + upper
+        self.grid_prices = upper + lower
         self.logger.log(f"Grid initialized with prices: {self.grid_prices}, Center price: {self.center_price}, Spacing: {spacing}", level="INFO")
         group_id = ut.generate_order_id('INIT')
 
@@ -194,11 +200,14 @@ class USDTGridStrategy:
                 'groud_id': group_id,
                 'base_price': float(self.center_price),
                 'spacing': float(self.spacing),
-                'create_date': pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'date' : datetime.now().date(),
+                'time' : datetime.timestamp(datetime.now()),
+                'create_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             db.save_state(items)
         
         self.logger.log("Saved grid state to SQLite", level="DEBUG")
+        return group_id
 
     def bootstrap(self, history: pd.DataFrame):
         df = history.copy()
@@ -218,27 +227,35 @@ class USDTGridStrategy:
         # use last row to init grid
         last = df.iloc[-1]
         spacing = last['TR'] * (2.0 if last['TR'] > last['ATR'] else 1.0)
-        self.initialize_grid(last['Close'], spacing)
-        self.place_initial_orders(self)
+        grid_id = self.initialize_grid(last['Close'], spacing)
+        self.place_initial_orders(self.order_size_usdt, self.grid_prices, grid_id)
 
-    def place_initial_orders(self) -> None:
-        for price in self.grid_prices:
-            qty = round(self.order_size_usdt / price, 6)
+    def place_initial_orders(self, order_size_usdt, grid_prices, grid_id):
+
+        GridStateDB.load_state_with_use_flgs("Y")
+        resp = {}
+        for price in grid_prices:
+            qty = round(order_size_usdt / price, 6)
             if self.mode == "live" and self.exchange_sync:
                 if price < self.center_price:
-                    self.exchange_sync.place_limit_buy(self.symbol, price, qty)
+                    resp = self.exchange_sync.place_limit_buy(self.symbol, price, qty, True)
                     self.logger.log(f"Placed live limit buy for {qty}@{price}", level="INFO")
                 else:
-                    self.exchange_sync.place_limit_sell(self.symbol, price, qty)
+                    resp = self.exchange_sync.place_limit_sell(self.symbol, price, qty, True)
                     self.logger.log(f"Placed live limit sell for {qty}@{price}", level="INFO")
                 self.grid_state[price] = 'open'
             elif self.mode == "forward_test":
-                if price < self.center_price:
-                    self.positions.append((qty, price, round(price + self.spacing, 2), self.spacing))
-                    self.logger.log(f"Simulated open buy {qty}@{price}", level="INFO")
-                if price > self.center_price:
-                    self.positions.append((qty, price, round(price + self.spacing, 2), self.spacing))
-                    self.logger.log(f"Simulated open sell {qty}@{price}", level="INFO")
+                self.logger.log(f"Simulated open {price}", level="INFO")
+                # if price < self.center_price:
+                resp = self.exchange_sync.place_limit_buy(self.symbol, price, qty, False)
+                #     self.logger.log(f"Simulated open buy {qty}@{price}", level="INFO")
+                # if price > self.center_price:
+                #     resp = self.exchange_sync.place_limit_sell(self.symbol, price, qty, False)
+                self.logger.log(f"Simulated open sell {qty}@{price}", level="INFO")
+
+        self.spot_db.create_order({'symbol': resp['symbol'], 'side': resp['side'], 'order_id': resp['order_id'], 
+                                   '': grid_id,'type': resp['type'], 'price': resp['price'], 'amount': resp['amount'], 
+                                   'status': resp['status'], 'timestamp': resp['timestamp']})
 
     def on_candle(self, timestamp: int, open: float, high: float, low: float, close: float, volume: float) -> None:
         prev_df = self.db.get_recent_ohlcv(self.symbol, 1)

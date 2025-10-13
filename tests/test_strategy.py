@@ -23,7 +23,6 @@ class TestUSDTGridStrategy(unittest.TestCase):
         # Initialize the strategy
         strategy = USDTGridStrategy(
             symbol='BTC/USDT',
-            environment='development',
             atr_period=14,
             atr_mean_window=100,
             ema_periods=[9, 21, 50]

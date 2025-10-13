@@ -14,41 +14,45 @@ class FuturesOrdersDB:
         cursor = conn.cursor()
         # Create futures_orders table
         cursor.execute("""
-        CREATE TABLE IF NOT EXISTS futures_orders (
-            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-            order_id             INTEGER   NOT NULL UNIQUE,
-            client_order_id      TEXT,
-            symbol               TEXT      NOT NULL,
-            status               TEXT      NOT NULL,
-            type                 TEXT      NOT NULL,
-            side                 TEXT      NOT NULL,
-            price                REAL      NOT NULL,
-            avg_price            REAL      NOT NULL DEFAULT 0,
-            orig_qty             REAL      NOT NULL,
-            executed_qty         REAL      NOT NULL,
-            cum_quote            REAL      NOT NULL DEFAULT 0,
-            time_in_force        TEXT,
-            stop_price           REAL      NOT NULL DEFAULT 0,
-            iceberg_qty          REAL      NOT NULL DEFAULT 0,
-            time                 INTEGER   NOT NULL,
-            update_time          INTEGER   NOT NULL,
-            is_working           INTEGER   NOT NULL DEFAULT 1,
-            position_side        TEXT      DEFAULT 'BOTH',
-            reduce_only          INTEGER   NOT NULL DEFAULT 0,
-            close_position       INTEGER   NOT NULL DEFAULT 0,
-            working_type         TEXT      DEFAULT 'CONTRACT_PRICE',
-            price_protect        INTEGER   NOT NULL DEFAULT 0,
-            orig_type            TEXT,
-            margin_asset         TEXT,
-            leverage             INTEGER
+                            CREATE TABLE IF NOT EXISTS futures_orders (
+                                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                                order_id             INTEGER   NOT NULL UNIQUE,
+                                client_order_id      TEXT,
+                                symbol               TEXT      NOT NULL,
+                                status               TEXT      NOT NULL,
+                                type                 TEXT      NOT NULL,
+                                side                 TEXT      NOT NULL,
+                                price                REAL      NOT NULL,
+                                avg_price            REAL      NOT NULL DEFAULT 0,
+                                orig_qty             REAL      NOT NULL,
+                                executed_qty         REAL      NOT NULL,
+                                cum_quote            REAL      NOT NULL DEFAULT 0,
+                                time_in_force        TEXT,
+                                stop_price           REAL      NOT NULL DEFAULT 0,
+                                iceberg_qty          REAL      NOT NULL DEFAULT 0,
+                                time                 INTEGER   NOT NULL,
+                                update_time          INTEGER   NOT NULL,
+                                is_working           INTEGER   NOT NULL DEFAULT 1,
+                                position_side        TEXT      DEFAULT 'BOTH',
+                                reduce_only          INTEGER   NOT NULL DEFAULT 0,
+                                close_position       INTEGER   NOT NULL DEFAULT 0,
+                                working_type         TEXT      DEFAULT 'CONTRACT_PRICE',
+                                price_protect        INTEGER   NOT NULL DEFAULT 0,
+                                orig_type            TEXT,
+                                margin_asset         TEXT,
+                                leverage             INTEGER
+                            )
+                        """
         )
-        """)
+
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_futures_orders_symbol ON futures_orders(symbol)"
         )
+
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_futures_orders_time ON futures_orders(time)"
         )
+        
         conn.commit()
         conn.close()
 

@@ -1,5 +1,7 @@
 import ccxt
 from typing import Dict, List, Any
+from datetime import datetime
+from utils import utils
 
 def create_exchanges(api_key: str, api_secret: str, testnet: bool = False):
     spot = ccxt.binance({
@@ -8,6 +10,7 @@ def create_exchanges(api_key: str, api_secret: str, testnet: bool = False):
         'enableRateLimit': True,
         'options': {'defaultType': 'spot', 'adjustForTimeDifference': True}
     })
+
     futures = ccxt.binance({
         'apiKey': api_key,
         'secret': api_secret,
@@ -25,9 +28,10 @@ class ExchangeSync:
     """
     Sync grid state and orders with exchange.
     """
-    def __init__(self, spot: Any, symbol: str):
+    def __init__(self, spot: Any, symbol: str, mode: str = 'forward_test'):
         self.spot = spot
         self.symbol = symbol
+        self.mode = mode
 
     def sync_grid_state(self, grid_prices: List[float]) -> Dict[float, bool]:
         state = {p: False for p in grid_prices}
@@ -39,11 +43,15 @@ class ExchangeSync:
                     state[price] = True
         return state
 
-    def place_limit_buy(self, symbol: str, price: float, qty: float) -> Any:
-        return self.spot.create_order(symbol, 'limit', 'buy', qty, price)
+    def place_limit_buy(self, symbol: str, price: float, qty: float, exchange: True) -> Any:
+        if exchange:             
+            return self.spot.create_order(symbol, 'limit', 'buy', qty, price)
+        else:
+            return {'symbol': symbol, 'side': 'buy', 'order_id': utils.generate_order_id("BUY"), 'type': 'limit', 'price': price, 'amount': qty, 'status': 'open', 'timestamp': datetime.now().timestamp()}
     
-    def place_limit_sell(self, symbol: str, price: float, qty: float) -> Any:
-        return self.spot.create_order(symbol, 'limit', 'sell', qty, price)
+    def place_limit_sell(self, symbol: str, price: float, qty: float, exchange: True) -> Any:
+        if exchange:             
+            return self.spot.create_order(symbol, 'limit', 'sell', qty, price, )
+        else:
+            return {'symbol': symbol, 'side': 'sell', 'order_id': utils.generate_order_id("SELL"), 'type': 'limit', 'price': price, 'amount': qty, 'status': 'open', 'timestamp': datetime.now().timestamp()}
 
-    def place_market_order(self, symbol: str, side: str, qty: float) -> Any:
-        return self.spot.create_order(symbol, 'market', side, qty)
