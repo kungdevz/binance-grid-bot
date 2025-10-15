@@ -14,9 +14,7 @@ class TestGridStateDB(unittest.TestCase):
         os.remove(self.db_path)
 
     def test_save_and_load_state(self):
-        # เบื้องต้นยังไม่มีข้อมูล
         self.assertEqual(self.db.load_state(), {})
-        # บันทึกและอ่านกลับ
         state = {1.0: False, 2.5: True}
         self.db.save_state(state)
         self.assertEqual(self.db.load_state(), state)

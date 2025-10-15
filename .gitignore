@@ -1,5 +1,5 @@
-.venv/
-
+venv/
+*.csv
 .env
 __pycache__/
 
