@@ -4,3 +4,7 @@ venv/
 __pycache__/
 
 *.sqlite3
+.vscode/
+binance_grid_bot.egg-info/
+.DS_Store
+*.log

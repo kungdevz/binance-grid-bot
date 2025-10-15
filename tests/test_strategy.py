@@ -1,6 +1,5 @@
 import unittest
 from unittest.mock import MagicMock
-import pandas as pd
 from strategy import USDTGridStrategy
 
 class TestUSDTGridStrategy(unittest.TestCase):

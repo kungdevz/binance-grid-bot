@@ -3,9 +3,9 @@ import json
 import os
 import pandas as pd
 import websockets
-from exchange import create_exchanges, ExchangeSync
-from strategy import USDTGridStrategy
-from config import CONFIG
+from grid_bot.exchange import create_exchanges, ExchangeSync
+from grid_bot.strategy import USDTGridStrategy
+from grid_bot.config import CONFIG
 
 async def main():
 
