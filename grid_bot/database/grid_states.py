@@ -82,7 +82,7 @@ class GridStateDatabase:
         conn.close()
         return cursor.lastrowid
 
-    def mark_filled(self, price: float) -> None:
+    def mark_filled(self, price: float) -> int:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
@@ -95,8 +95,9 @@ class GridStateDatabase:
         )
         conn.commit()
         conn.close()
+        return cursor.rowid
 
-    def mark_open(self, price: float) -> None:
+    def mark_open(self, price: float) -> int:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
@@ -109,8 +110,9 @@ class GridStateDatabase:
         )
         conn.commit()
         conn.close()
+        return cursor.rowid
 
-    def cancel_open(self) -> None:
+    def cancel_all_open(self) -> int:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(

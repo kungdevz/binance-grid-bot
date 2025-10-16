@@ -1,7 +1,7 @@
 from typing import Dict, Any, Optional, List
 from abc import ABC, abstractmethod
 
-class AccountBalanceRepo(ABC):
+class AccountBalanceRepository(ABC):
     @abstractmethod
     def insert_balance(self, data: Dict[str, Any]) -> int: 
         """
