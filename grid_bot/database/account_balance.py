@@ -1,7 +1,7 @@
 import sqlite3
 from typing import Dict, Any, Optional, List
 
-class AccountBalanceDB:
+class AccountBalanceDatabase:
     """
     Handles persistence of account balances using SQLite.
     """

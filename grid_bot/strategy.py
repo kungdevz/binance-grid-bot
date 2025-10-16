@@ -1,28 +1,27 @@
 import os
 import pandas as pd
 import numpy as np
-import utils.utils as ut
 from typing import Any, Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
 
-from database.future_orders_db import FuturesOrdersDB
-from database.grid_states_db import GridStateDB
-from database.spot_orders_db import SpotOrdersDB
-from database.account_balance import AccountBalanceDB
+from grid_bot.database.future_orders_db import FuturesOrdersDB
+from grid_bot.database.grid_states import GridStateDB
+from grid_bot.database.spot_orders_db import SpotOrdersDB
 
-from exchange import create_exchanges, ExchangeSync
+from grid_bot.exchange import create_exchanges, ExchangeSync
+from grid_bot.database.logger import Logger
 
-from exchange import ExchangeSync
-from logger import Logger
+from grid_bot.repositories.account_balance import AccountBalance
+import grid_bot.utils.util as util
 
 class USDTGridStrategy:
     def __init__(
-         self,
+        self,
         symbol: str,
         db_path: str = "database/schema/backtest_bot.db",
         atr_period: int = 14,
         atr_mean_window: int = 100,
-        ema_periods: Dict[str, int] = None,
+        ema_periods: Dict[str, int] = None
     ):
         # Basic configuration from .env
         self.symbol = symbol
@@ -38,9 +37,9 @@ class USDTGridStrategy:
         }
 
          # Mode and grid parameters
-        self.mode = os.getenv("mode", "forward_test")                     # "forward_test" or "live"
-        self.reserve_ratio = float(os.getenv("reserve_ratio", 0.3))       # Portion of capital reserved
-        self.grid_levels = int(os.getenv("grid_levels", 5))               # Number of grid levels
+        self.mode = os.getenv("MODE", "forward_test")                     # "forward_test" or "live"
+        self.reserve_ratio = float(os.getenv("RESERVE_RATIO", 0.3))       # Portion of capital reserved
+        self.grid_levels = int(os.getenv("GRID_LEVELS", 5))               # Number of grid levels
 
         # Fees and initial capital will be loaded per mode
         self.spot_fee = 0.0
@@ -54,10 +53,10 @@ class USDTGridStrategy:
         # Initialize databases
         self.spot_db = SpotOrdersDB(self.db_path)
         self.futures_db = FuturesOrdersDB(self.db_path)
-        self.balance_db = AccountBalanceDB(self.db_path)
+        self.acc_balance_db = AccountBalance(self.db_path)
         self.grid_db = GridStateDB(self.db_path)
 
-         # Initialize capital, exchanges, fees, balances, and positions
+        # Initialize capital, exchanges, fees, balances, and positions
         self._init_capital_and_fees()
         if self.mode == "live":
             self._init_live_mode()
@@ -94,7 +93,7 @@ class USDTGridStrategy:
         self.initial_capital = balance.total  # total USDT balance
         self.logger.log(f"Live USDT balance fetched: {self.initial_capital}", level="INFO")
         # Persist balance record
-        self.balance_db.insert_balance({
+        self.acc_balance_db.insert_balance({
             "record_date": datetime.now().date(),
             "record_time": datetime.timestamp(datetime.now()),
             "start_balance_usdt":self.initial_capital,
@@ -190,7 +189,7 @@ class USDTGridStrategy:
 
         self.grid_prices = upper + lower
         self.logger.log(f"Grid initialized with prices: {self.grid_prices}, Center price: {self.center_price}, Spacing: {spacing}", level="INFO")
-        group_id = ut.generate_order_id('INIT')
+        group_id = util.generate_order_id('INIT')
 
         for price in self.grid_prices:
             db = GridStateDB(db_path=self.db_path)
@@ -208,8 +207,8 @@ class USDTGridStrategy:
         
         self.logger.log("Saved grid state to SQLite", level="DEBUG")
         return group_id
-
-    def bootstrap(self, history: pd.DataFrame):
+    
+    def define_spacing_size(self, atr_period: int, history: pd.DataFrame):
         df = history.copy()
         # 1. calculate true range series
         tr = pd.concat([
@@ -218,7 +217,7 @@ class USDTGridStrategy:
             (df['Low']  - df['Close'].shift()).abs()
         ], axis=1).max(axis=1)
 
-        atr = tr.rolling(self.atr_period).mean()
+        atr = tr.rolling(atr_period).mean()
         df['TR'], df['ATR'] = tr, atr
         
         # track prev_close for first streaming candle
@@ -227,7 +226,11 @@ class USDTGridStrategy:
         # use last row to init grid
         last = df.iloc[-1]
         spacing = last['TR'] * (2.0 if last['TR'] > last['ATR'] else 1.0)
-        grid_id = self.initialize_grid(last['Close'], spacing)
+        return spacing
+
+    def bootstrap(self, history: pd.DataFrame):
+        spacing = self.define_spacing_size(history, self.atr_period)
+        grid_id = self.initialize_grid(history['Close'].iloc[-1], spacing, self.grid)
         self.place_initial_orders(self.order_size_usdt, self.grid_prices, grid_id)
 
     def place_initial_orders(self, order_size_usdt, grid_prices, grid_id):

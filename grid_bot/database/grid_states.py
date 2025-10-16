@@ -1,7 +1,7 @@
 import sqlite3
 from typing import Dict, List, Any
 
-class GridStateDB:
+class GridStateDatabase:
     """
     Handles persistence of grid state using SQLite, with statuses and timestamps.
     """
@@ -56,7 +56,7 @@ class GridStateDB:
         conn.close()
         return [dict(zip(columns, row)) for row in rows]
 
-    def save_state(self, entry: dict) -> None:
+    def save_state(self, entry: dict) -> int:
         """
         Upsert grid entries:
         - New entries are inserted with status as given.
@@ -80,6 +80,7 @@ class GridStateDB:
         )
         conn.commit()
         conn.close()
+        return cursor.lastrowid
 
     def mark_filled(self, price: float) -> None:
         conn = sqlite3.connect(self.db_path)

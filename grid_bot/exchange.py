@@ -1,7 +1,7 @@
 import ccxt
 from typing import Dict, List, Any
 from datetime import datetime
-from utils import utils
+import grid_bot.utils.util as util
 
 def create_exchanges(api_key: str, api_secret: str, testnet: bool = False):
     spot = ccxt.binance({
@@ -47,11 +47,11 @@ class ExchangeSync:
         if exchange:             
             return self.spot.create_order(symbol, 'limit', 'buy', qty, price)
         else:
-            return {'symbol': symbol, 'side': 'buy', 'order_id': utils.generate_order_id("BUY"), 'type': 'limit', 'price': price, 'amount': qty, 'status': 'open', 'timestamp': datetime.now().timestamp()}
+            return {'symbol': symbol, 'side': 'buy', 'order_id': util.generate_order_id("BUY"), 'type': 'limit', 'price': price, 'amount': qty, 'status': 'open', 'timestamp': datetime.now().timestamp()}
     
     def place_limit_sell(self, symbol: str, price: float, qty: float, exchange: True) -> Any:
         if exchange:             
             return self.spot.create_order(symbol, 'limit', 'sell', qty, price, )
         else:
-            return {'symbol': symbol, 'side': 'sell', 'order_id': utils.generate_order_id("SELL"), 'type': 'limit', 'price': price, 'amount': qty, 'status': 'open', 'timestamp': datetime.now().timestamp()}
+            return {'symbol': symbol, 'side': 'sell', 'order_id': util.generate_order_id("SELL"), 'type': 'limit', 'price': price, 'amount': qty, 'status': 'open', 'timestamp': datetime.now().timestamp()}
 
