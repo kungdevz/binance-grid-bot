@@ -2,29 +2,15 @@ import unittest
 import pandas as pd
 import numpy as np
 
-from unittest.mock import MagicMock
 from grid_bot.database.logger import Logger
-from grid_bot.strategy import USDTGridStrategy as strategy\
-
-class FakeRepo(GridStateRepo):
-    def __init__(self):
-        self.saved = []
-
-    def save(self, items):
-        # no DB calls here — just collect for assertions
-        self.saved.append(items)
-
-
-class DummyLogger(Logger):
-    pass
+from grid_bot.strategy import USDTGridStrategy as strategy
+from grid_bot.database.grid_states import GridState as GridState
 
 class TestUSDTGridStrategy(unittest.TestCase):
 
     def setUp(self):
-        self.mock_db = MagicMock()
         self.strategy = strategy(
             symbol='BTC/USDT',
-            db_path=':memory:',
             atr_period=14,
             atr_mean_window=100,
             ema_periods=[9, 21, 50]
@@ -32,12 +18,16 @@ class TestUSDTGridStrategy(unittest.TestCase):
         self.define_spacing_size = strategy.define_spacing_size
         self.df = pd.DataFrame({
             'Time': pd.date_range(start='2023-01-01', periods=10, freq='H'),
-            'Open': [100 + i for i in range(10)],
-            'High': [105 + i for i in range(10)],
-            'Low': [95 + i for i in range(10)],
-            'Close': [102 + i for i in range(10)],
-            'Volume': [10 + i for i in range(10)]
+            'Open': [100 + i for i in range(1000)],
+            'High': [105 + i for i in range(1000)],
+            'Low': [95 + i for i in range(1000)],
+            'Close': [102 + i for i in range(1000)],
+            'Volume': [10 + i for i in range(1000)]
         })
+
+    def tearDown(self):
+        self.strategy.acc_balance_db.delete_all_balances()
+        return super().tearDown()
 
     def test_spacing_size_normal_case(self):
         atr_period = 5
