@@ -1,48 +1,63 @@
-import sqlite3
+import mysql.connector
 from typing import Any, Dict, List, Optional, Tuple
+from grid_bot.database.base_database import BaseMySQLRepo
 
-class SpotOrdersDB:
+
+class SpotOrders(BaseMySQLRepo):
     """
     CRUD operations for spot_orders table.
     """
-    def __init__(self, db_path: str = "database/schema/backtest_bot.db"):
-        self.db_path = db_path
-        self._init_schema()
 
     def _init_schema(self) -> None:
-        conn = sqlite3.connect(self.db_path)
+        conn = self.get_conn()
         cursor = conn.cursor()
         # Create spot_orders table if not exists
         cursor.execute("""
-        CREATE TABLE IF NOT EXISTS spot_orders (
-            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-            order_id             INTEGER NOT NULL UNIQUE,
-            client_order_id      TEXT,
-            grid_id              REAL    NOT NULL,
-            symbol               TEXT    NOT NULL,
-            status               TEXT    NOT NULL,
-            type                 TEXT    NOT NULL,
-            side                 TEXT    NOT NULL,
-            price                REAL    NOT NULL,
-            avg_price            REAL    NOT NULL DEFAULT 0,
-            orig_qty             REAL    NOT NULL,
-            executed_qty         REAL    NOT NULL,
-            cummulative_quote_qty REAL   NOT NULL DEFAULT 0,
-            time_in_force        TEXT,
-            stop_price           REAL    NOT NULL DEFAULT 0,
-            iceberg_qty          REAL    NOT NULL DEFAULT 0,
-            time                 INTEGER NOT NULL,
-            update_time          INTEGER NOT NULL,
-            is_working           INTEGER NOT NULL DEFAULT 1
-        )
+            CREATE TABLE IF NOT EXISTS spot_orders (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id             INTEGER NOT NULL UNIQUE,
+                client_order_id      TEXT,
+                grid_id              REAL    NOT NULL,
+                symbol               TEXT    NOT NULL,
+                status               TEXT    NOT NULL,
+                type                 TEXT    NOT NULL,
+                side                 TEXT    NOT NULL,
+                price                REAL    NOT NULL,
+                avg_price            REAL    NOT NULL DEFAULT 0,
+                orig_qty             REAL    NOT NULL,
+                executed_qty         REAL    NOT NULL,
+                cummulative_quote_qty REAL   NOT NULL DEFAULT 0,
+                time_in_force        TEXT,
+                stop_price           REAL    NOT NULL DEFAULT 0,
+                iceberg_qty          REAL    NOT NULL DEFAULT 0,
+                time                 INTEGER NOT NULL,
+                update_time          INTEGER NOT NULL,
+                is_working           INTEGER NOT NULL DEFAULT 1
+            )
         """)
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_spot_orders_symbol ON spot_orders(symbol)"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_spot_orders_time ON spot_orders(time)"
-        )
+
+        cursor.execute("""
+            SELECT COUNT(1) FROM INFORMATION_SCHEMA.STATISTICS
+            WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = 'spot_orders'
+            AND INDEX_NAME = 'idx_spot_orders_symbol';
+        """)
+        
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("CREATE INDEX idx_spot_orders_symbol ON spot_orders(symbol)")
+
+        cursor.execute("""
+            SELECT COUNT(1) FROM INFORMATION_SCHEMA.STATISTICS
+            WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = 'spot_orders'
+            AND INDEX_NAME = 'idx_spot_orders_time';
+        """)
+        
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("CREATE INDEX idx_spot_orders_time ON spot_orders(time)")
+        
         conn.commit()
+        cursor.close()
         conn.close()
 
     def create_order(self, data: Dict[str, Any]) -> int:
@@ -57,7 +72,7 @@ class SpotOrdersDB:
         placeholders = ", ".join("?" for _ in cols)
         values = [data.get(col) for col in cols]
 
-        conn = sqlite3.connect(self.db_path)
+        conn = self.get_conn()
         cursor = conn.cursor()
         cursor.execute(
             f"INSERT INTO spot_orders ({', '.join(cols)}) VALUES ({placeholders})",
@@ -65,17 +80,19 @@ class SpotOrdersDB:
         )
         row_id = cursor.lastrowid
         conn.commit()
+        cursor.close()
         conn.close()
         return row_id
 
     def get_order(self, order_id: int) -> Optional[Dict[str, Any]]:
         """Fetch a single spot order by Binance order_id."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self.get_conn()
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM spot_orders WHERE order_id = ?", (order_id,)
+            "SELECT * FROM spot_orders WHERE order_id = %s", (order_id,)
         )
         row = cursor.fetchone()
+        cursor.close()
         conn.close()
         if not row:
             return None
@@ -84,11 +101,11 @@ class SpotOrdersDB:
 
     def list_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         """List all spot orders, optionally filtered by symbol."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self.get_conn()
         cursor = conn.cursor()
         if symbol:
             cursor.execute(
-                "SELECT * FROM spot_orders WHERE symbol = ? ORDER BY time", (symbol,)
+                "SELECT * FROM spot_orders WHERE symbol = %s ORDER BY time", (symbol,)
             )
         else:
             cursor.execute("SELECT * FROM spot_orders ORDER BY time")
@@ -104,20 +121,20 @@ class SpotOrdersDB:
         set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
         values = list(updates.values()) + [order_id]
 
-        conn = sqlite3.connect(self.db_path)
+        conn = self.get_conn()
         cursor = conn.cursor()
         cursor.execute(
-            f"UPDATE spot_orders SET {set_clause} WHERE order_id = ?", values
+            "UPDATE spot_orders SET {set_clause} WHERE order_id = %s", values
         )
         conn.commit()
         conn.close()
 
     def delete_order(self, order_id: int) -> None:
         """Delete a spot order by Binance order_id."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self.get_conn()
         cursor = conn.cursor()
         cursor.execute(
-            "DELETE FROM spot_orders WHERE order_id = ?", (order_id,)
+            "DELETE FROM spot_orders WHERE order_id = %s", (order_id,)
         )
         conn.commit()
         conn.close()

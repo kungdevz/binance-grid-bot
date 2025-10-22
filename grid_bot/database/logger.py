@@ -1,19 +1,18 @@
 import os
-import sqlite3
+import mysql.connector
 from datetime import datetime
+from grid_bot.database.base_database import BaseMySQLRepo
 
-class Logger:
+class Logger(BaseMySQLRepo):
     """
     Simple logger: prints to console in dev, saves to DB in production.
     """
-    def __init__(self, env: str = None, db_path: str = "logs.db"):
-        self.env = env
-        self.db_path = db_path
-        if self.env == "production":
-            self._init_db()
-
-    def _init_db(self):
-        conn = sqlite3.connect(self.db_path)
+    def __init__(self):
+        super().__init__()       # ✅ initializes connection pool
+        self._ensure_table()     # safe place to use DB (open/close)
+    
+    def _ensure_table(self):
+        conn = self._get_conn()  # ✅ use _get_conn(), not super()._get_conn()
         cursor = conn.cursor()
         cursor.execute(
             '''
@@ -25,18 +24,19 @@ class Logger:
             '''
         )
         conn.commit()
+        cursor.close()
         conn.close()
 
-    def log(self, message: str, level: str = "INFO"):
+    def log(self, message: str, level: str = "INFO", env: str = None):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        if self.env == "development":
+        if env == "development":
             print(f"[{ts}] [{level}] {message}")
         else:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_conn()
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO logs (timestamp, level, message) VALUES (?, ?, ?)",
-                (ts, level, message)
+                "INSERT INTO logs (timestamp, level, message) VALUES (%s, %s, %s)", (ts, level, message)
             )
             conn.commit()
+            cursor.close()
             conn.close()

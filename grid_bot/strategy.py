@@ -4,28 +4,28 @@ import numpy as np
 from typing import Any, Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
 
-from grid_bot.database.future_orders_db import FuturesOrdersDB
-from grid_bot.database.grid_states import GridStateDB
-from grid_bot.database.spot_orders_db import SpotOrdersDB
+from grid_bot.database.future_orders import FuturesOrders
+from grid_bot.database.grid_states import GridState
+from grid_bot.database.ohlcv_data import OhlcvData
+from grid_bot.database.spot_orders import SpotOrders
+from grid_bot.database.account_balance import AccountBalance
 
 from grid_bot.exchange import create_exchanges, ExchangeSync
 from grid_bot.database.logger import Logger
 
-from grid_bot.repositories.account_balance import AccountBalance
 import grid_bot.utils.util as util
 
 class USDTGridStrategy:
+
     def __init__(
         self,
         symbol: str,
-        db_path: str = "database/schema/backtest_bot.db",
         atr_period: int = 14,
         atr_mean_window: int = 100,
         ema_periods: Dict[str, int] = None
     ):
         # Basic configuration from .env
         self.symbol = symbol
-        self.db_path = db_path
         self.atr_period = atr_period
         self.atr_mean_window = atr_mean_window
         self.ema_periods = ema_periods or {
@@ -39,43 +39,33 @@ class USDTGridStrategy:
          # Mode and grid parameters
         self.mode = os.getenv("MODE", "forward_test")                     # "forward_test" or "live"
         self.reserve_ratio = float(os.getenv("RESERVE_RATIO", 0.3))       # Portion of capital reserved
-        self.grid_levels = int(os.getenv("GRID_LEVELS", 5))               # Number of grid levels
-
-        # Fees and initial capital will be loaded per mode
-        self.spot_fee = 0.0
-        self.futures_fee = 0.0
-        self.initial_capital = 0.0
-
-        # Logger
-        self.logger = Logger(env=os.getenv("ENVIRONMENT", "development"), db_path=self.db_path)
-        self.logger.log(f"Initializing strategy in {self.mode} mode", level="DEBUG")
+        self.grid_levels = int(os.getenv("GRID_LEVELS", 5))
+        
+        # Initialize Logger
+        self.logger = Logger()
+        self.logger.log(f"Initializing strategy in {self.mode} mode", level="DEBUG", env=os.getenv("ENVIRONMENT", "development"))
 
         # Initialize databases
-        self.spot_db = SpotOrdersDB(self.db_path)
-        self.futures_db = FuturesOrdersDB(self.db_path)
-        self.acc_balance_db = AccountBalance(self.db_path)
-        self.grid_db = GridStateDB(self.db_path)
+        self.spot_db = SpotOrders()
+        self.futures_db = FuturesOrders()
+        self.acc_balance_db = AccountBalance()
+        self.grid_db = GridState()
+        self.ohlcv = OhlcvData()
 
-        # Initialize capital, exchanges, fees, balances, and positions
-        self._init_capital_and_fees()
         if self.mode == "live":
             self._init_live_mode()
         else:
+            self._init_capital_and_fees()
             self._init_forward_mode()
-
-        # Common state reset
+            
         self.reset()
 
+    """ Fees and initial capital will be loaded per mode, Initialize capital, exchanges, fees, balances, and positions """
     def _init_capital_and_fees(self):
-        if self.mode == "forward_test":
-            # Load test parameters from .env
-            self.initial_capital = float(os.getenv("INITIAL_CAPITAL", 10000))
-            self.spot_fee       = float(os.getenv("SPOT_FEE", 0.001))
-            self.futures_fee    = float(os.getenv("FUTURES_FEE", 0.0004))
-            self.reserve_capital = self.initial_capital * self.reserve_ratio
-        else:
-            # Live: we'll fetch capital and fees from the exchange
-            self.initial_capital = None  # will set after fetching balance
+        self.initial_capital = float(os.getenv("INITIAL_CAPITAL", 10000))
+        self.spot_fee       = float(os.getenv("SPOT_FEE", 0.001))
+        self.futures_fee    = float(os.getenv("FUTURES_FEE", 0.0004))
+        self.reserve_capital = self.initial_capital * self.reserve_ratio
 
     def _init_live_mode(self):
         # Connect to exchanges
@@ -94,8 +84,8 @@ class USDTGridStrategy:
         self.logger.log(f"Live USDT balance fetched: {self.initial_capital}", level="INFO")
         # Persist balance record
         self.acc_balance_db.insert_balance({
-            "record_date": datetime.now().date(),
-            "record_time": datetime.timestamp(datetime.now()),
+            "record_date": datetime.now().strftime("%Y-%m-%d"),
+            "record_time": datetime.now().strftime("%H:%M:%S"),
             "start_balance_usdt":self.initial_capital,
             "end_balance_usdt": self.initial_capital,
             "notes": "Initial live balance"
@@ -121,12 +111,12 @@ class USDTGridStrategy:
         self.order_size_usdt = (self.initial_capital - self.reserve_capital) / self.grid_levels
         self.logger.log(f"Order size set to {self.order_size_usdt} USDT", level="DEBUG")
         self.set_exchanges(None, None, self.symbol)
-        self.balance_db.insert_balance({
-            "record_date": datetime.now().date(),
-            "record_time": datetime.timestamp(datetime.now()),
+        self.acc_balance_db.insert_balance({
+            "record_date": datetime.now().strftime("%Y-%m-%d"),
+            "record_time": datetime.now().strftime("%H:%M:%S"),
             "start_balance_usdt":self.initial_capital,
             "end_balance_usdt": self.initial_capital,
-            "notes" : "Initial forward-test balance" 
+            "notes" : "Initial forward-test balance"
         })
 
     def set_exchanges(self, spot: Any, futures: Any, symbol: str, mode: str = "forward_test"):
@@ -167,10 +157,9 @@ class USDTGridStrategy:
             self.on_candle(ts, float(row['Open']), float(row['High']), float(row['Low']), float(row['Close']), float(row['Volume']))
         return self.get_summary()
 
-
     def load_grid_state(self):
         if self.mode == "forward_test" and self.db:
-            self.grid_state = self.db.load_state()
+            self.grid_state = self.grid_db.load_state_with_use_flgs("Y")
             self.logger.log("Loaded grid state from SQLite", level="DEBUG")
         elif self.mode == "live" and self.exchange_sync and self.grid_initialized:
             self.grid_state = self.exchange_sync.sync_grid_state(self.grid_prices)
@@ -192,7 +181,7 @@ class USDTGridStrategy:
         group_id = util.generate_order_id('INIT')
 
         for price in self.grid_prices:
-            db = GridStateDB(db_path=self.db_path)
+            db = GridState(db_path=self.db_path)
             items = {
                 'grid_price': price,
                 'use_status': 'Y',
@@ -235,7 +224,7 @@ class USDTGridStrategy:
 
     def place_initial_orders(self, order_size_usdt, grid_prices, grid_id):
 
-        GridStateDB.load_state_with_use_flgs("Y")
+        GridState.load_state_with_use_flgs("Y")
         resp = {}
         for price in grid_prices:
             qty = round(order_size_usdt / price, 6)
@@ -247,13 +236,9 @@ class USDTGridStrategy:
                     resp = self.exchange_sync.place_limit_sell(self.symbol, price, qty, True)
                     self.logger.log(f"Placed live limit sell for {qty}@{price}", level="INFO")
                 self.grid_state[price] = 'open'
-            elif self.mode == "forward_test":
+            elif self.mode == "forward_test" or "backtest":
                 self.logger.log(f"Simulated open {price}", level="INFO")
-                # if price < self.center_price:
                 resp = self.exchange_sync.place_limit_buy(self.symbol, price, qty, False)
-                #     self.logger.log(f"Simulated open buy {qty}@{price}", level="INFO")
-                # if price > self.center_price:
-                #     resp = self.exchange_sync.place_limit_sell(self.symbol, price, qty, False)
                 self.logger.log(f"Simulated open sell {qty}@{price}", level="INFO")
 
         self.spot_db.create_order({'symbol': resp['symbol'], 'side': resp['side'], 'order_id': resp['order_id'], 
@@ -284,7 +269,7 @@ class USDTGridStrategy:
             emas[name] = float(close if prev is None else alpha * close + (1 - alpha) * prev)
 
         # บันทึกลงฐานข้อมูล
-        self.db.insert_ohlcv_data(
+        self.ohlcv.insert_ohlcv_data(
             self.symbol,
             timestamp,
             open,
