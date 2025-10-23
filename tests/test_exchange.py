@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import MagicMock
-from exchange import ExchangeSync
+from grid_bot.exchange import ExchangeSync
 
 class TestExchangeSync(unittest.TestCase):
     def setUp(self):

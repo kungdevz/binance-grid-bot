@@ -1,4 +1,3 @@
-import mysql.connector
 from typing import Dict, List, Any
 from grid_bot.database.base_database import BaseMySQLRepo
 
@@ -41,21 +40,20 @@ class GridState(BaseMySQLRepo):
         conn.commit()
         conn.close()
 
-    def load_state_with_use_flgs(self, use_flgs : str = 'Y') -> List[Dict[str, Any]]:
-        """
-        Load grid entries that are not cancelled.
-        Returns a dict mapping price to its status ('Y' or 'N').
-        """
+    def load_state_with_use_flgs(self, use_flgs: str = "Y") -> List[Dict[str, Any]]:
         conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM grid_state WHERE use_status = ? ORDER BY grid_price ASC", (use_flgs)
-        )
-        rows = cursor.fetchall()
-        conn.close()
-        columns = [col[0] for col in cursor.description]
-        conn.close()
-        return [dict(zip(columns, row)) for row in rows]
+        cursor = conn.cursor(dictionary=True)
+        try:
+            cursor.execute(
+                "SELECT * FROM grid_state WHERE use_status = %s ORDER BY grid_price ASC",
+                (use_flgs,),
+            )
+            rows = cursor.fetchall()
+            return rows
+        finally:
+            cursor.close()
+            conn.close()
+
 
     def save_state(self, entry: dict) -> int:
         """
@@ -67,21 +65,32 @@ class GridState(BaseMySQLRepo):
         cursor = conn.cursor()
         cursor.execute(
             """
-                INSERT INTO grid_state (grid_price, use_status, groud_id, base_price, spacing, date, time, create_date)
-                    VALUES (:grid_price, :use_status, :groud_id, :base_price, :spacing, :date, :time, :create_date)
-                    ON CONFLICT(groud_id, grid_price) DO UPDATE SET
-                        use_status   = excluded.use_status,
-                        base_price   = excluded.base_price,
-                        spacing      = excluded.spacing,
-                        date         = excluded.date,
-                        time         = excluded.time,
-                        create_date  = excluded.create_date
+                INSERT INTO grid_state (
+                    grid_price,
+                    use_status,
+                    groud_id,
+                    base_price,
+                    spacing,
+                    date,
+                    time,
+                    create_date
+                ) VALUES ( %(grid_price)s, %(use_status)s, %(groud_id)s, %(base_price)s, %(spacing)s, %(date)s, %(time)s, %(create_date)s )
+                ON DUPLICATE KEY UPDATE
+                    use_status   = VALUES(use_status),
+                    base_price   = VALUES(base_price),
+                    spacing      = VALUES(spacing),
+                    date         = VALUES(date),
+                    time         = VALUES(time),
+                    create_date  = VALUES(create_date);
             """,
             entry
         )
+
+        id = cursor.lastrowid
         conn.commit()
+        cursor.close()
         conn.close()
-        return cursor.lastrowid
+        return id
 
     def mark_filled(self, price: float) -> int:
         conn = self._get_conn()
@@ -126,3 +135,11 @@ class GridState(BaseMySQLRepo):
         )
         conn.commit()
         conn.close()
+
+    def delete_all_states(self) -> int:
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM grid_state")
+        conn.commit()
+        conn.close()
+        return cursor.rowcount

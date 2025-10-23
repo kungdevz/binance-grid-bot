@@ -15,7 +15,7 @@ from grid_bot.database.logger import Logger
 
 import grid_bot.utils.util as util
 
-class USDTGridStrategy:
+class Strategy:
 
     def __init__(
         self,
@@ -171,7 +171,7 @@ class USDTGridStrategy:
     def initialize_grid(self, base_price: float, spacing: float, levels: int = 10) -> str :
         
         self.center_price = base_price
-        self.spacing      = spacing
+        self.spacing = spacing
         
         lower = [float(round(base_price - spacing * i, 2)) for i in range(1, levels+1)]
         upper = [float(round(base_price + spacing * i, 2)) for i in range(1, levels+1)]
@@ -181,23 +181,23 @@ class USDTGridStrategy:
         group_id = util.generate_order_id('INIT')
 
         for price in self.grid_prices:
-            db = GridState(db_path=self.db_path)
+            db = GridState()
             items = {
                 'grid_price': price,
                 'use_status': 'Y',
                 'groud_id': group_id,
                 'base_price': float(self.center_price),
                 'spacing': float(self.spacing),
-                'date' : datetime.now().date(),
-                'time' : datetime.timestamp(datetime.now()),
+                'date' : datetime.now().strftime('%Y-%m-%d'),
+                'time' : datetime.now().strftime('%H:%M:%S'),
                 'create_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             db.save_state(items)
         
-        self.logger.log("Saved grid state to SQLite", level="DEBUG")
+        self.logger.log("Saved grid state to Database", level="DEBUG")
         return group_id
     
-    def define_spacing_size(self, atr_period: int, history: pd.DataFrame):
+    def define_spacing_size(self, atr_period: int, history: pd.DataFrame) -> float:
         df = history.copy()
         # 1. calculate true range series
         tr = pd.concat([
@@ -245,8 +245,9 @@ class USDTGridStrategy:
                                    '': grid_id,'type': resp['type'], 'price': resp['price'], 'amount': resp['amount'], 
                                    'status': resp['status'], 'timestamp': resp['timestamp']})
 
+    
     def on_candle(self, timestamp: int, open: float, high: float, low: float, close: float, volume: float) -> None:
-        prev_df = self.db.get_recent_ohlcv(self.symbol, 1)
+        prev_df = self.ohlcv.get_recent_ohlcv(self.symbol, 1)
         if not prev_df.empty:
             prev_close = prev_df['close'].iloc[-1]
             prev_emas = {name: prev_df[name].iloc[-1] for name in self.ema_periods}
@@ -254,9 +255,9 @@ class USDTGridStrategy:
             prev_close = close
             prev_emas = {name: None for name in self.ema_periods}
 
-        # คำนวณ TR และ ATR
+        # calculate TR and ATR
         tr = self._calc_tr_single(high, low, prev_close)
-        hist = self.db.get_recent_ohlcv(self.symbol, self.atr_period)['tr'].tolist()
+        hist = self.ohlcv.get_recent_ohlcv(self.symbol, self.atr_period)['tr'].tolist()
         tr_list = (hist + [tr])[-self.atr_period:]
         atr_value = float(np.mean(tr_list))
         atr_mean = float(np.mean(tr_list))
@@ -286,7 +287,7 @@ class USDTGridStrategy:
             emas['ema_200']
         )
 
-        # เตรียม row สำหรับ grid/hedge logic
+        # prepare row for grid/hedge logic
         row = pd.Series({
             'timestamp': timestamp,
             'Close': close,
@@ -294,25 +295,23 @@ class USDTGridStrategy:
             'ATR_mean': atr_mean,
             **emas
         }, name=timestamp)
-        # 5) ส่งต่อให้ logic หลักทำงาน
         self._process_tick(row)
 
-    def _calc_tr_single(self, high: float, low: float, close: float) -> float:
-        """
-        คำนวณ True Range จาก high, low และ prev_close (float)
-        แล้วอัปเดต self.prev_close เป็น close
-        """
-        # ถ้า prev_close ยัง None ให้ใช้ high-low
-        if self.prev_close is None:
-            tr = high - low
-        else:
-            tr1 = high - low
-            tr2 = abs(high - self.prev_close)
-            tr3 = abs(low  - self.prev_close)
-            tr  = max(tr1, tr2, tr3)
-
-        # เก็บ close ปัจจุบันไว้ใช้ครั้งถัดไป
-        self.prev_close = close
+    """ You must first use the following formula to calculate the true range: TR = Max [(H-L),|H- Cp|,|L-Cp|] 
+        where 
+            H = Current Period High
+            L = Current Period Low
+            Cp = Previous Period Close
+        so that True Range (TR) is the greatest of the following:
+            (H-L)   = Current High less the current Low
+            |H- Cp| = Current High less the previous Close (absolute value)
+            |L-Cp|  = Current Low less the previous Close (absolute value)
+    """
+    def _calc_tr_single(self, high: float, low: float, prev_close: float) -> float:
+        tr1 = high - low
+        tr2 = abs(high - prev_close)
+        tr3 = abs(low  - prev_close)
+        tr  = max(tr1, tr2, tr3)
         return tr
 
     def _process_tick(self, row: pd.Series) -> None:

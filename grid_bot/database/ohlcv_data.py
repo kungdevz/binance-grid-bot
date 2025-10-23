@@ -86,13 +86,12 @@ class OhlcvData(BaseMySQLRepo):
         ดึง OHLCV พร้อม ATR/EMA ล่าสุดตามจำนวน limit เพื่อนำมาคำนวณ indicators
         """
         query = '''
-        SELECT timestamp, open, high, low, close, volume, tr, atr
-               ema_14, ema_28, ema_50, ema_100, ema_200
-        FROM ohlcv_data
-        WHERE symbol = ?
-        ORDER BY timestamp DESC
-        LIMIT ?
+            SELECT timestamp, open, high, low, close, volume, tr, atr
+                ema_14, ema_28, ema_50, ema_100, ema_200
+            FROM ohlcv_data
+            WHERE symbol = %s
+            ORDER BY timestamp DESC
+            LIMIT %s
         '''
         df = pd.read_sql_query(query, self.conn, params=(symbol, limit))
-        # คืนค่า DataFrame เรียง timestamp จากเก่า->ใหม่
         return df.iloc[::-1].reset_index(drop=True)

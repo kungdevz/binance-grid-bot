@@ -4,7 +4,7 @@ import os
 import pandas as pd
 import websockets
 from grid_bot.exchange import create_exchanges, ExchangeSync
-from grid_bot.strategy import USDTGridStrategy
+from grid_bot.strategy import Strategy
 from grid_bot.config import CONFIG
 
 async def main():
@@ -12,9 +12,8 @@ async def main():
     mode = CONFIG['mode']
     symbol = CONFIG['symbol']
 
-    bot = USDTGridStrategy(
+    bot = Strategy(
         symbol=symbol,
-        db_path=CONFIG['db_path'],
         atr_period=CONFIG['atr_period'],
         atr_mean_window=CONFIG['atr_mean_window'],
         ema_periods=CONFIG['ema_periods']
