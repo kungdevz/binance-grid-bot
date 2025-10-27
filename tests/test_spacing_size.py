@@ -11,7 +11,7 @@ class TestSpacingSize(unittest.TestCase):
 
     def setUp(self):
         self.strategy = strategy(
-            symbol='BTC/USDT',
+            symbol='None',
             atr_period=14,
             atr_mean_window=100,
             ema_periods=[9, 21, 50]

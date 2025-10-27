@@ -6,15 +6,15 @@ from grid_bot.database.base_database import BaseMySQLRepo
 
 class AccountBalance(BaseMySQLRepo):
     """
-    Handles persistence of account balances using SQLite.
+    Handles persistence of account balances using Mysql.
     """
 
     def __init__(self):
-        super().__init__()       # ✅ initializes connection pool
+        super().__init__()       # initializes connection pool
         self._ensure_table()     # safe place to use DB (open/close)
     
     def _ensure_table(self):
-        conn = self._get_conn()  # ✅ use _get_conn(), not super()._get_conn()
+        conn = self._get_conn()  # use _get_conn(), not super()._get_conn()
         cursor = conn.cursor()
         cursor.execute(
             """

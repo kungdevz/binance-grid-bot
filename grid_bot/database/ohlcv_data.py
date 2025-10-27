@@ -1,6 +1,4 @@
-import mysql.connector
 from typing import Optional, List, Dict, Any
-import pandas as pd
 
 from grid_bot.database.base_database import BaseMySQLRepo
 
@@ -10,7 +8,7 @@ class OhlcvData(BaseMySQLRepo):
         conn = self._get_conn()
         cursor = conn.cursor()
 
-        cursor.execute('''
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS ohlcv_data (
                 symbol        VARCHAR(20)   NOT NULL,
                 timestamp     BIGINT        NOT NULL,
@@ -29,7 +27,7 @@ class OhlcvData(BaseMySQLRepo):
                 ema_200       DOUBLE        NOT NULL,
                 PRIMARY KEY (symbol, timestamp)
             )
-        ''')
+        """)
 
         cursor.execute("""
             SELECT COUNT(1) FROM INFORMATION_SCHEMA.STATISTICS
@@ -45,53 +43,118 @@ class OhlcvData(BaseMySQLRepo):
         cursor.close()
         conn.close()
 
-    def insert_ohlcv_data(
-        self,
-        symbol: str,
-        timestamp: int,
-        open: float,
-        high: float,
-        low: float,
-        close: float,
-        volume: float,
-        tr: float,
-        atr: float,
-        ema_14: float,
-        ema_28: float,
-        ema_50: float,
-        ema_100: float,
-        ema_200: float
-    ):
+    def insert_ohlcv_data(self,data: dict) -> int:
+
+        try:
+
+            conn = self._get_conn()
+            cursor = conn.cursor()
+
+            insert_sql = '''
+                INSERT INTO ohlcv_data(
+                    symbol, timestamp, open_price, high_price, low_price, close_price, volume,
+                    tr, atr_14, atr_28, ema_14, ema_28, ema_50, ema_100, ema_200
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            '''
+
+            cursor.execute(insert_sql, (
+                data["symbol"], data["timestamp"], data["open_price"], data["high_price"],
+                data["low_price"], data["close_price"], data["volume"], data["tr"],
+                data["atr_14"], data["atr_28"], data["ema_14"], data["ema_28"],
+                data["ema_50"], data["ema_100"], data["ema_200"]
+            ))
+
+            conn.commit()
+            return cursor.rowcount
+    
+        finally:
+            cursor.close() 
+            conn.close()
+
+    def delete_ohlcv_data(self, symbol: str, timestamp: int) -> int:
         conn = self._get_conn()
         cursor = conn.cursor()
 
-        insert_sql = '''
-            INSERT OR REPLACE INTO ohlcv_data(
-                symbol, timestamp, open, high, low, close, volume,
-                tr, atr, ema_14, ema_28, ema_50, ema_100, ema_200
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            '''
-        cursor.execute(
-            insert_sql,
-            (symbol, timestamp, open, high, low, close, volume,
-             tr, atr, ema_14, ema_28, ema_50, ema_100, ema_200)
-        )
+        delete_sql = 'DELETE FROM ohlcv_data WHERE symbol = %s AND timestamp = %s'
+        cursor.execute(delete_sql, (symbol, timestamp))
 
+        affected_rows = cursor.rowcount
         conn.commit()
+
         cursor.close()
         conn.close()
 
-    def get_recent_ohlcv(self, symbol: str, limit: int) -> pd.DataFrame:
-        """
-        ดึง OHLCV พร้อม ATR/EMA ล่าสุดตามจำนวน limit เพื่อนำมาคำนวณ indicators
-        """
+        return affected_rows
+    
+    def delete_ohlcv_older_than(self, symbol: str, timestamp: int) -> int:
+        conn = self._get_conn()
+        cursor = conn.cursor()
+
+        delete_sql = 'DELETE FROM ohlcv_data WHERE symbol = %s AND timestamp < %s'
+        cursor.execute(delete_sql, (symbol, timestamp))
+
+        affected_rows = cursor.rowcount
+        conn.commit()
+
+        cursor.close()
+        conn.close()
+
+        return affected_rows
+    
+    def delete_ohlcv_by_symbol(self, symbol: str) -> int:
+        conn = self._get_conn()
+        cursor = conn.cursor()
+
+        delete_sql = 'DELETE FROM ohlcv_data WHERE symbol = %s'
+        cursor.execute(delete_sql, (symbol,))
+
+        affected_rows = cursor.rowcount
+        conn.commit()
+
+        cursor.close()
+        conn.close()
+
+        return affected_rows
+    
+    def get_recent_ohlcv_by_timestamp(self, symbol: str, timestamp: int, limit: int) -> List[Dict[str, Any]]:
+        conn = self._get_conn()
+        cursor = conn.cursor()
         query = '''
-            SELECT timestamp, open, high, low, close, volume, tr, atr
-                ema_14, ema_28, ema_50, ema_100, ema_200
+            SELECT symbol, timestamp, open_price, high_price, low_price, close_price, volume, 
+                tr, atr_14, atr_28, ema_14, ema_28, ema_50, ema_100, ema_200
+            FROM ohlcv_data
+            WHERE symbol = %s AND timestamp <= %s
+            ORDER BY timestamp DESC
+            LIMIT %s
+        '''
+        try:   
+            cursor.execute(query, (symbol, timestamp, limit))
+            rows = cursor.fetchall()    
+            return rows
+        finally:
+            cursor.close()
+            conn.close()
+
+    def get_recent_ohlcv(self, symbol: str, limit: int) -> List[Dict[str, Any]]:
+        conn = self._get_conn()
+        cursor = conn.cursor(dictionary=True)
+
+        query = '''
+            SELECT timestamp, open_price, high_price, low_price, 
+                close_price, volume, tr, atr_14, atr_28, ema_14, 
+                ema_28, ema_50, ema_100, ema_200
             FROM ohlcv_data
             WHERE symbol = %s
             ORDER BY timestamp DESC
             LIMIT %s
         '''
-        df = pd.read_sql_query(query, self.conn, params=(symbol, limit))
-        return df.iloc[::-1].reset_index(drop=True)
+
+        try:
+            cursor.execute(
+                query, (symbol, limit)
+            )
+            rows = cursor.fetchall()
+            return rows
+        finally:
+            cursor.close()
+            conn.close()

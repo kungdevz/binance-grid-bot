@@ -3,7 +3,7 @@ from grid_bot.database.base_database import BaseMySQLRepo
 
 class GridState(BaseMySQLRepo):
     """
-    Handles persistence of grid state using SQLite, with statuses and timestamps.
+    Handles persistence of grid state using Mysql, with statuses and timestamps.
     """
 
     def __init__(self):
@@ -13,16 +13,17 @@ class GridState(BaseMySQLRepo):
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS `grid_state` (
-                `id` INT AUTO_INCREMENT PRIMARY KEY,               -- เพิ่ม id สำหรับ primary key
-                `grid_price` DECIMAL(18,8) NOT NULL,               -- ราคาของ grid
-                `use_status` VARCHAR(1) NOT NULL DEFAULT 'N',      -- สถานะใช้งาน (Y/N)
-                `groud_id` VARCHAR(64) NOT NULL,                   -- กลุ่มคำสั่ง
-                `date` DATE DEFAULT (CURRENT_DATE),                -- วันที่บันทึก (YYYY-MM-DD)
-                `time` TIME DEFAULT NULL,                          -- เวลาบันทึก (HH:MM:SS)
-                `base_price` DECIMAL(18,8) NOT NULL DEFAULT 0.0,   -- ราคาฐาน
-                `spacing` DECIMAL(18,8) NOT NULL DEFAULT 0.0,      -- ระยะห่างระหว่าง grid
-                `create_date` DATETIME DEFAULT CURRENT_TIMESTAMP,  -- วันที่สร้าง
-                `update_date` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP -- วันที่อัปเดต
+                `id` INT AUTO_INCREMENT PRIMARY KEY,
+                `symbol` varchar(255) NOT NULL,
+                `grid_price` decimal(18, 8) NOT NULL,
+                `use_status` varchar(1) NOT NULL DEFAULT 'N',
+                `group_id` varchar(64) NOT NULL,
+                `date` date DEFAULT(curdate()),
+                `time` time DEFAULT NULL,
+                `base_price` decimal(18, 8) NOT NULL DEFAULT '0.00000000',
+                `spacing` decimal(18, 8) NOT NULL DEFAULT '0.00000000',
+                `create_date` datetime DEFAULT CURRENT_TIMESTAMP,
+                `update_date` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP            
             )
             """
         )
@@ -35,7 +36,7 @@ class GridState(BaseMySQLRepo):
         """)
         
         if cursor.fetchone()[0] == 0:
-            cursor.execute("CREATE INDEX ux_grid_group_price ON grid_state(groud_id, grid_price)")
+            cursor.execute("CREATE INDEX ux_grid_group_price ON grid_state(group_id, grid_price)")
 
         conn.commit()
         conn.close()
@@ -54,7 +55,6 @@ class GridState(BaseMySQLRepo):
             cursor.close()
             conn.close()
 
-
     def save_state(self, entry: dict) -> int:
         """
         Upsert grid entries:
@@ -66,21 +66,24 @@ class GridState(BaseMySQLRepo):
         cursor.execute(
             """
                 INSERT INTO grid_state (
+                    symbol,
                     grid_price,
                     use_status,
-                    groud_id,
+                    group_id,
                     base_price,
                     spacing,
                     date,
                     time,
                     create_date
-                ) VALUES ( %(grid_price)s, %(use_status)s, %(groud_id)s, %(base_price)s, %(spacing)s, %(date)s, %(time)s, %(create_date)s )
+                ) VALUES ( %(symbol)s, %(grid_price)s, %(use_status)s, %(group_id)s, %(base_price)s, %(spacing)s, %(date)s, %(time)s, %(create_date)s )
                 ON DUPLICATE KEY UPDATE
+                    symbol       = VALUES(symbol),
                     use_status   = VALUES(use_status),
                     base_price   = VALUES(base_price),
                     spacing      = VALUES(spacing),
                     date         = VALUES(date),
                     time         = VALUES(time),
+                    group_id     = VALUES(group_id),
                     create_date  = VALUES(create_date);
             """,
             entry

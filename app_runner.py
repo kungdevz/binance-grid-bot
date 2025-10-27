@@ -65,7 +65,8 @@ async def connect_and_listen(uri, strat):
                         ts = k["T"]            # close time (ms)
                         o, h, l, c = map(float, (k["o"], k["h"], k["l"], k["c"]))
                         v = float(k["v"])
-                        strat.on_candle(ts, o, h, l, c, v)
+                        row = strat.on_candle(ts, o, h, l, c, v)
+                        strat._process_tick(row)
         except Exception as e:
             print(f"WebSocket error: {e}. Reconnecting in 5s…")
             await asyncio.sleep(5)

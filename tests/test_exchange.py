@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 from grid_bot.exchange import ExchangeSync
 
 class TestExchangeSync(unittest.TestCase):
+    
     def setUp(self):
         # สร้าง mock ของ spot.exchange
         self.mock_spot = MagicMock()

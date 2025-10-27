@@ -65,9 +65,9 @@ class SpotOrders(BaseMySQLRepo):
         Insert a new spot order. Returns the internal row id.
         """
         cols = [
-            "order_id", "client_order_id", "symbol", "status", "type", "side",
-            "price", "avg_price", "orig_qty", "executed_qty", "cummulative_quote_qty",
-            "time_in_force", "stop_price", "iceberg_qty", "time", "update_time", "is_working"
+            "order_id", "client_order_id", "symbol", "status", "type", "side", "price", 
+            "avg_price", "orig_qty", "executed_qty", "cummulative_quote_qty", "time_in_force", 
+            "stop_price", "iceberg_qty", "time", "update_time", "is_working"
         ]
         placeholders = ", ".join("?" for _ in cols)
         values = [data.get(col) for col in cols]

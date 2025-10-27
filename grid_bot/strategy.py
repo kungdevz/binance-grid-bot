@@ -50,7 +50,7 @@ class Strategy:
         self.futures_db = FuturesOrders()
         self.acc_balance_db = AccountBalance()
         self.grid_db = GridState()
-        self.ohlcv = OhlcvData()
+        self.ohlcv_db = OhlcvData()
 
         if self.mode == "live":
             self._init_live_mode()
@@ -123,7 +123,7 @@ class Strategy:
         self.spot = spot
         self.futures = futures
         self.symbol = symbol
-        self.symbol_futures = symbol.replace("/", "") # e.g. BTC/USDT -> BTCUSDT
+        self.symbol_futures = symbol.replace("/", "")
         self.exchange_sync = ExchangeSync(spot, symbol, mode)
         self.logger.log(f"Exchanges set for symbol {symbol}", level="DEBUG")
 
@@ -154,7 +154,8 @@ class Strategy:
         for idx, row in df.iterrows():
             # convert pandas Timestamp to epoch ms
             ts = int(idx.value // 10**6)
-            self.on_candle(ts, float(row['Open']), float(row['High']), float(row['Low']), float(row['Close']), float(row['Volume']))
+            row = self.on_candle(ts, float(row['Open']), float(row['High']), float(row['Low']), float(row['Close']), float(row['Volume']))
+            self._process_tick(row)
         return self.get_summary()
 
     def load_grid_state(self):
@@ -168,34 +169,29 @@ class Strategy:
             self.grid_state = {}
             self.logger.log("Initialized empty grid state", level="DEBUG")        
 
-    def initialize_grid(self, base_price: float, spacing: float, levels: int = 10) -> str :
-        
-        self.center_price = base_price
-        self.spacing = spacing
+    def initialize_grid(self, symbol: str, base_price: float, spacing: float, levels: int = 10) -> Tuple[str, List[float]]:
         
         lower = [float(round(base_price - spacing * i, 2)) for i in range(1, levels+1)]
         upper = [float(round(base_price + spacing * i, 2)) for i in range(1, levels+1)]
 
-        self.grid_prices = upper + lower
-        self.logger.log(f"Grid initialized with prices: {self.grid_prices}, Center price: {self.center_price}, Spacing: {spacing}", level="INFO")
+        grid_prices = upper + lower
         group_id = util.generate_order_id('INIT')
-
-        for price in self.grid_prices:
-            db = GridState()
+        self.logger.log(f"Grid initialized with base price: {base_price}, spacing: {spacing}, groud_id: {group_id}, prices: {grid_prices}", level="INFO")
+        for price in grid_prices:
             items = {
+                'symbol': symbol,
                 'grid_price': price,
                 'use_status': 'Y',
-                'groud_id': group_id,
-                'base_price': float(self.center_price),
-                'spacing': float(self.spacing),
+                'group_id': group_id,
+                'base_price': float(base_price),
+                'spacing': float(spacing),
                 'date' : datetime.now().strftime('%Y-%m-%d'),
                 'time' : datetime.now().strftime('%H:%M:%S'),
                 'create_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
-            db.save_state(items)
-        
-        self.logger.log("Saved grid state to Database", level="DEBUG")
-        return group_id
+            self.grid_db.save_state(items)
+
+        return (group_id, grid_prices)
     
     def define_spacing_size(self, atr_period: int, history: pd.DataFrame) -> float:
         df = history.copy()
@@ -219,17 +215,15 @@ class Strategy:
 
     def bootstrap(self, history: pd.DataFrame):
         spacing = self.define_spacing_size(history, self.atr_period)
-        grid_id = self.initialize_grid(history['Close'].iloc[-1], spacing, self.grid)
-        self.place_initial_orders(self.order_size_usdt, self.grid_prices, grid_id)
+        group_id, grid_prices = self.initialize_grid(symbol=self.symbol, base_price=history['Close'].iloc[-1],  spacing=spacing,  levels=self.grid_levels)
+        self.place_initial_orders(order_size_usdt=self.order_size_usdt, grid_prices=grid_prices, group_id=group_id, center_price=history['Close'].iloc[-1])
 
-    def place_initial_orders(self, order_size_usdt, grid_prices, grid_id):
-
-        GridState.load_state_with_use_flgs("Y")
+    def place_initial_orders(self, order_size_usdt : float, grid_prices : list[float], grid_id : str, center_price : float):
         resp = {}
         for price in grid_prices:
             qty = round(order_size_usdt / price, 6)
             if self.mode == "live" and self.exchange_sync:
-                if price < self.center_price:
+                if price < center_price:
                     resp = self.exchange_sync.place_limit_buy(self.symbol, price, qty, True)
                     self.logger.log(f"Placed live limit buy for {qty}@{price}", level="INFO")
                 else:
@@ -241,13 +235,12 @@ class Strategy:
                 resp = self.exchange_sync.place_limit_buy(self.symbol, price, qty, False)
                 self.logger.log(f"Simulated open sell {qty}@{price}", level="INFO")
 
-        self.spot_db.create_order({'symbol': resp['symbol'], 'side': resp['side'], 'order_id': resp['order_id'], 
-                                   '': grid_id,'type': resp['type'], 'price': resp['price'], 'amount': resp['amount'], 
+        self.spot_db.create_order({'symbol': resp['symbol'], 'side': resp['side'], 'order_id': resp['order_id'], '': grid_id,'type': resp['type'], 'price': resp['price'], 'amount': resp['amount'], 
                                    'status': resp['status'], 'timestamp': resp['timestamp']})
 
-    
-    def on_candle(self, timestamp: int, open: float, high: float, low: float, close: float, volume: float) -> None:
-        prev_df = self.ohlcv.get_recent_ohlcv(self.symbol, 1)
+    def on_candle(self, symbol: str ,timestamp: int, open: float, high: float, low: float, close: float, volume: float) -> pd.Series:
+        
+        prev_df = self.ohlcv_db.get_recent_ohlcv(symbol, 1)
         if not prev_df.empty:
             prev_close = prev_df['close'].iloc[-1]
             prev_emas = {name: prev_df[name].iloc[-1] for name in self.ema_periods}
@@ -257,45 +250,23 @@ class Strategy:
 
         # calculate TR and ATR
         tr = self._calc_tr_single(high, low, prev_close)
-        hist = self.ohlcv.get_recent_ohlcv(self.symbol, self.atr_period)['tr'].tolist()
+        hist = self.ohlcv_db.get_recent_ohlcv(symbol, self.atr_period)['tr'].tolist()
         tr_list = (hist + [tr])[-self.atr_period:]
         atr_value = float(np.mean(tr_list))
         atr_mean = float(np.mean(tr_list))
 
-        # คำนวณ EMA แต่ละช่วง
+        # calcalate EMA values
         emas: Dict[str, float] = {}
         for name, period in self.ema_periods.items():
             alpha = 2 / (period + 1)
             prev = prev_emas.get(name)
             emas[name] = float(close if prev is None else alpha * close + (1 - alpha) * prev)
 
-        # บันทึกลงฐานข้อมูล
-        self.ohlcv.insert_ohlcv_data(
-            self.symbol,
-            timestamp,
-            open,
-            high,
-            low,
-            close,
-            volume,
-            tr,
-            atr_value,
-            emas['ema_14'],
-            emas['ema_28'],
-            emas['ema_50'],
-            emas['ema_100'],
-            emas['ema_200']
+        self.ohlcv_db.insert_ohlcv_data(
+            symbol, timestamp, open, high, low, close, volume, tr, atr_value, emas['ema_14'], emas['ema_28'], emas['ema_50'], emas['ema_100'], emas['ema_200']
         )
 
-        # prepare row for grid/hedge logic
-        row = pd.Series({
-            'timestamp': timestamp,
-            'Close': close,
-            'ATR': atr_value,
-            'ATR_mean': atr_mean,
-            **emas
-        }, name=timestamp)
-        self._process_tick(row)
+        return pd.Series({ 'timestamp': timestamp, 'close': close, 'atr': atr_value, 'atr_mean': atr_mean, **emas }, name=timestamp)
 
     """ You must first use the following formula to calculate the true range: TR = Max [(H-L),|H- Cp|,|L-Cp|] 
         where 
@@ -315,16 +286,16 @@ class Strategy:
         return tr
 
     def _process_tick(self, row: pd.Series) -> None:
-        price = row['Close']
-        atr = row['ATR']
-        atr_avg = row['ATR_mean']
+        
+        price = row['close']
+        atr = row['atr']
+        atr_avg = row['atr_mean']
         multiplier = 2.0 if atr > atr_avg else 1.0
         spacing = atr * multiplier
 
-        if not self.grid_initialized:
-            self.initialize_grid(price, spacing)
+        grid_prices = self.grid_db.load_state_with_use_flgs("Y")
 
-        for gp in self.grid_prices:
+        for gp in grid_prices:
             if price <= gp and not self.grid_state.get(gp, False) and self.available_capital >= self.order_size_usdt:
                 self._buy_grid(row.name, gp, spacing)
 
