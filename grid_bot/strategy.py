@@ -10,7 +10,7 @@ from grid_bot.database.ohlcv_data import OhlcvData
 from grid_bot.database.spot_orders import SpotOrders
 from grid_bot.database.account_balance import AccountBalance
 
-from grid_bot.exchange import create_exchanges, ExchangeSync
+from grid_bot.exchange import ExchangeSync as exchange
 from grid_bot.database.logger import Logger
 
 import grid_bot.utils.util as util
@@ -20,15 +20,17 @@ class Strategy:
     def __init__(
         self,
         symbol: str,
+        futures_symbol: str,
         atr_period: int = 14,
         atr_mean_window: int = 100,
-        ema_periods: Dict[str, int] = None
+        mode: str = "forward_test"
     ):
         # Basic configuration from .env
         self.symbol = symbol
+        self.futures_symbol = futures_symbol
         self.atr_period = atr_period
         self.atr_mean_window = atr_mean_window
-        self.ema_periods = ema_periods or {
+        self.ema_periods = {
             'ema_14': 14,
             'ema_28': 28,
             'ema_50': 50,
@@ -36,42 +38,49 @@ class Strategy:
             'ema_200': 200
         }
 
-         # Mode and grid parameters
-        self.mode = os.getenv("MODE", "forward_test")                     # "forward_test" or "live"
-        self.reserve_ratio = float(os.getenv("RESERVE_RATIO", 0.3))       # Portion of capital reserved
+        # Mode and grid parameters
+        self.reserve_ratio = float(os.getenv("RESERVE_RATIO", 0.3))  # Portion of capital reserved
         self.grid_levels = int(os.getenv("GRID_LEVELS", 5))
         
         # Initialize Logger
         self.logger = Logger()
-        self.logger.log(f"Initializing strategy in {self.mode} mode", level="DEBUG", env=os.getenv("ENVIRONMENT", "development"))
+        self.logger.log(f"Initializing strategy in {mode} mode", level="DEBUG", env=os.getenv("ENVIRONMENT", "development"))
+        self.mode = mode
 
         # Initialize databases
-        self.spot_db = SpotOrders()
-        self.futures_db = FuturesOrders()
+        self.grid_db        = GridState()
+        self.ohlcv_db       = OhlcvData()
+        self.spot_db        = SpotOrders()
+        self.futures_db     = FuturesOrders()
         self.acc_balance_db = AccountBalance()
-        self.grid_db = GridState()
-        self.ohlcv_db = OhlcvData()
+        self.spot_order_db  = SpotOrders()
 
-        if self.mode == "live":
+        if mode == "live":
             self._init_live_mode()
+        elif self.mode == "forward_test":
+            self._init_capital_and_fees()
+            self._init_forward_mode()
+        elif self.mode == "backtest":
+            self._init_capital_and_fees()
+            self._init_forward_mode()
         else:
             self._init_capital_and_fees()
             self._init_forward_mode()
-            
+
         self.reset()
 
     """ Fees and initial capital will be loaded per mode, Initialize capital, exchanges, fees, balances, and positions """
     def _init_capital_and_fees(self):
         self.initial_capital = float(os.getenv("INITIAL_CAPITAL", 10000))
-        self.spot_fee       = float(os.getenv("SPOT_FEE", 0.001))
-        self.futures_fee    = float(os.getenv("FUTURES_FEE", 0.0004))
+        self.spot_fee        = float(os.getenv("SPOT_FEE", 0.001))
+        self.futures_fee     = float(os.getenv("FUTURES_FEE", 0.0004))
         self.reserve_capital = self.initial_capital * self.reserve_ratio
 
     def _init_live_mode(self):
         # Connect to exchanges
-        api_key    = os.getenv("API_KEY")
-        api_secret = os.getenv("API_SECRET")
-        spot, futures = create_exchanges(api_key, api_secret)
+        api_key       = os.getenv("API_SPOT_KEY")
+        api_secret    = os.getenv("API_SPOT_SECRET")
+        spot, futures = exchange()
         self.set_exchanges(spot, futures, self.symbol, mode="live")
 
         # Fetch fees from exchange
@@ -82,6 +91,7 @@ class Strategy:
         balance = self.spot.get_account_balance(asset="USDT")
         self.initial_capital = balance.total  # total USDT balance
         self.logger.log(f"Live USDT balance fetched: {self.initial_capital}", level="INFO")
+
         # Persist balance record
         self.acc_balance_db.insert_balance({
             "record_date": datetime.now().strftime("%Y-%m-%d"),
@@ -110,7 +120,7 @@ class Strategy:
         self.logger.log(f"Reserve capital set to {self.reserve_capital}", level="DEBUG")
         self.order_size_usdt = (self.initial_capital - self.reserve_capital) / self.grid_levels
         self.logger.log(f"Order size set to {self.order_size_usdt} USDT", level="DEBUG")
-        self.set_exchanges(None, None, self.symbol)
+        self.set_exchanges(None, None, self.symbol, self.futures_symbol, mode=self.mode)
         self.acc_balance_db.insert_balance({
             "record_date": datetime.now().strftime("%Y-%m-%d"),
             "record_time": datetime.now().strftime("%H:%M:%S"),
@@ -119,13 +129,13 @@ class Strategy:
             "notes" : "Initial forward-test balance"
         })
 
-    def set_exchanges(self, spot: Any, futures: Any, symbol: str, mode: str = "forward_test"):
+    def set_exchanges(self, spot: Any, futures: Any, spot_symbol: str, future_symbol: str, mode: str = "forward_test"):
         self.spot = spot
         self.futures = futures
-        self.symbol = symbol
-        self.symbol_futures = symbol.replace("/", "")
-        self.exchange_sync = ExchangeSync(spot, symbol, mode)
-        self.logger.log(f"Exchanges set for symbol {symbol}", level="DEBUG")
+        self.symbol = spot_symbol
+        self.symbol_futures = future_symbol
+        self.exchange_sync = exchange(spot, spot_symbol, mode)
+        self.logger.log(f"Exchanges set for symbol spot: {spot_symbol}, future spot: {future_symbol}", level="DEBUG")
 
     def reset(self):
         self.available_capital = self.initial_capital * (1 - self.reserve_ratio)
@@ -139,7 +149,7 @@ class Strategy:
         self.prev_close = None
         self.data_file_path = None
         self.logger.log("Strategy state reset", level="DEBUG")
-    
+
     def run_from_file(self, file_path: str) -> Dict[str, Any]:
         """
         Read OHLCV CSV and execute backtest.
@@ -150,12 +160,12 @@ class Strategy:
         df.set_index('time', inplace=True)
 
         # Bootstrap and process each candle 
-        self.bootstrap(df)
+        self.bootstrap(history=df)
         for idx, row in df.iterrows():
             # convert pandas Timestamp to epoch ms
             ts = int(idx.value // 10**6)
-            row = self.on_candle(ts, float(row['Open']), float(row['High']), float(row['Low']), float(row['Close']), float(row['Volume']))
-            self._process_tick(row)
+            row = self.on_candle(self.symbol, ts, float(row['Open']), float(row['High']), float(row['Low']), float(row['Close']), float(row['Volume']))
+            self._process_tick(self.symbol, row)
         return self.get_summary()
 
     def load_grid_state(self):
@@ -194,7 +204,7 @@ class Strategy:
         return (group_id, grid_prices)
     
     def define_spacing_size(self, atr_period: int, history: pd.DataFrame) -> float:
-        df = history.copy()
+        df = history.copy().reset_index(drop=True)
         # 1. calculate true range series
         tr = pd.concat([
             df['High'] - df['Low'],
@@ -202,7 +212,7 @@ class Strategy:
             (df['Low']  - df['Close'].shift()).abs()
         ], axis=1).max(axis=1)
 
-        atr = tr.rolling(atr_period).mean()
+        atr = tr.rolling(atr_period, min_periods=1).mean()
         df['TR'], df['ATR'] = tr, atr
         
         # track prev_close for first streaming candle
@@ -214,9 +224,9 @@ class Strategy:
         return spacing
 
     def bootstrap(self, history: pd.DataFrame):
-        spacing = self.define_spacing_size(history, self.atr_period)
-        group_id, grid_prices = self.initialize_grid(symbol=self.symbol, base_price=history['Close'].iloc[-1],  spacing=spacing,  levels=self.grid_levels)
-        self.place_initial_orders(order_size_usdt=self.order_size_usdt, grid_prices=grid_prices, group_id=group_id, center_price=history['Close'].iloc[-1])
+        spacing = self.define_spacing_size(history=history, atr_period=self.atr_period)
+        grid_id, grid_prices = self.initialize_grid(symbol=self.symbol, base_price=history['Close'].iloc[-1],  spacing=spacing,  levels=self.grid_levels)
+        self.place_initial_orders(order_size_usdt=self.order_size_usdt, grid_prices=grid_prices, grid_id=grid_id, center_price=history['Close'].iloc[-1])
 
     def place_initial_orders(self, order_size_usdt : float, grid_prices : list[float], grid_id : str, center_price : float):
         resp = {}
@@ -235,11 +245,13 @@ class Strategy:
                 resp = self.exchange_sync.place_limit_buy(self.symbol, price, qty, False)
                 self.logger.log(f"Simulated open sell {qty}@{price}", level="INFO")
 
-        self.spot_db.create_order({'symbol': resp['symbol'], 'side': resp['side'], 'order_id': resp['order_id'], '': grid_id,'type': resp['type'], 'price': resp['price'], 'amount': resp['amount'], 
-                                   'status': resp['status'], 'timestamp': resp['timestamp']})
+        self.spot_db.create_order({'symbol': resp['symbol'], 'side': resp['side'], 'order_id': resp['order_id'], 'grid_id': grid_id,
+                                   'type': resp['type'], 'price': resp['price'], 'avg_price': resp['price'], 'amount': resp['amount'], 
+                                   'status': resp['status'], 'time': resp['timestamp'], 'update_time': resp['timestamp']})
 
     def on_candle(self, symbol: str ,timestamp: int, open: float, high: float, low: float, close: float, volume: float) -> pd.Series:
         
+        # fetch previous close and EMA values
         prev_df = self.ohlcv_db.get_recent_ohlcv(symbol, 1)
         if not prev_df.empty:
             prev_close = prev_df['close'].iloc[-1]
@@ -262,9 +274,7 @@ class Strategy:
             prev = prev_emas.get(name)
             emas[name] = float(close if prev is None else alpha * close + (1 - alpha) * prev)
 
-        self.ohlcv_db.insert_ohlcv_data(
-            symbol, timestamp, open, high, low, close, volume, tr, atr_value, emas['ema_14'], emas['ema_28'], emas['ema_50'], emas['ema_100'], emas['ema_200']
-        )
+        self.ohlcv_db.insert_ohlcv_data(symbol, timestamp, open, high, low, close, volume, tr, atr_value, emas)
 
         return pd.Series({ 'timestamp': timestamp, 'close': close, 'atr': atr_value, 'atr_mean': atr_mean, **emas }, name=timestamp)
 
@@ -285,7 +295,7 @@ class Strategy:
         tr  = max(tr1, tr2, tr3)
         return tr
 
-    def _process_tick(self, row: pd.Series) -> None:
+    def _process_tick(self, symbol, row: pd.Series) -> None:
         
         price = row['close']
         atr = row['atr']
@@ -296,7 +306,8 @@ class Strategy:
         grid_prices = self.grid_db.load_state_with_use_flgs("Y")
 
         for gp in grid_prices:
-            if price <= gp and not self.grid_state.get(gp, False) and self.available_capital >= self.order_size_usdt:
+            price = gp["grid_price"]
+            if price <= grid_prices and self.available_capital >= self.order_size_usdt:
                 self._buy_grid(row.name, gp, spacing)
 
         self._check_sell(row.name, price)

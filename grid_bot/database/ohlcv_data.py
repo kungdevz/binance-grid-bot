@@ -1,4 +1,5 @@
 from typing import Optional, List, Dict, Any
+import pandas as pd
 
 from grid_bot.database.base_database import BaseMySQLRepo
 
@@ -43,7 +44,7 @@ class OhlcvData(BaseMySQLRepo):
         cursor.close()
         conn.close()
 
-    def insert_ohlcv_data(self,data: dict) -> int:
+    def insert_ohlcv_data(self, symbol, timestamp, open, high, low, close, volume, tr, atr_value, ema: dict) -> int:
 
         try:
 
@@ -53,15 +54,13 @@ class OhlcvData(BaseMySQLRepo):
             insert_sql = '''
                 INSERT INTO ohlcv_data(
                     symbol, timestamp, open_price, high_price, low_price, close_price, volume,
-                    tr, atr_14, atr_28, ema_14, ema_28, ema_50, ema_100, ema_200
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    tr, atr_14, ema_14, ema_28, ema_50, ema_100, ema_200
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             '''
 
             cursor.execute(insert_sql, (
-                data["symbol"], data["timestamp"], data["open_price"], data["high_price"],
-                data["low_price"], data["close_price"], data["volume"], data["tr"],
-                data["atr_14"], data["atr_28"], data["ema_14"], data["ema_28"],
-                data["ema_50"], data["ema_100"], data["ema_200"]
+                symbol, timestamp, open, high, low, close, volume, tr, atr_value, ema["ema_14"], ema["ema_28"],
+                ema["ema_50"], ema["ema_100"], ema["ema_200"]
             ))
 
             conn.commit()
@@ -135,7 +134,7 @@ class OhlcvData(BaseMySQLRepo):
             cursor.close()
             conn.close()
 
-    def get_recent_ohlcv(self, symbol: str, limit: int) -> List[Dict[str, Any]]:
+    def get_recent_ohlcv(self, symbol: str, limit: int) -> pd.DataFrame:
         conn = self._get_conn()
         cursor = conn.cursor(dictionary=True)
 
@@ -154,7 +153,10 @@ class OhlcvData(BaseMySQLRepo):
                 query, (symbol, limit)
             )
             rows = cursor.fetchall()
-            return rows
+            # Convert to DataFrame
+            columns = [desc[0] for desc in cursor.description]  # get column names
+            prev_df = pd.DataFrame(rows, columns=columns)
+            return prev_df
         finally:
             cursor.close()
             conn.close()

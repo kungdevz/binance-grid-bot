@@ -5,47 +5,51 @@ import pandas as pd
 import websockets
 from grid_bot.exchange import create_exchanges, ExchangeSync
 from grid_bot.strategy import Strategy
-from grid_bot.config import CONFIG
 
 async def main():
 
-    mode = CONFIG['mode']
-    symbol = CONFIG['symbol']
+    mode = os.getenv('MODE')
+    spot_symbol = os.getenv('SYMBOL')
+    futures_symbol = os.getenv('FUTURES_SYMBOL') 
 
     bot = Strategy(
-        symbol=symbol,
-        atr_period=CONFIG['atr_period'],
-        atr_mean_window=CONFIG['atr_mean_window'],
-        ema_periods=CONFIG['ema_periods']
+        symbol=spot_symbol,
+        futures_symbol=futures_symbol,
+        atr_period=int(os.getenv('ATR_PERIOD')),
+        atr_mean_window=int(os.getenv('ATR_MEAN_WINDOW')),
+        mode=mode
     )
 
-    bot.set_exchanges(spot, futures, symbol=symbol)
-
-    if mode == 'forward_test':
+    if mode == 'backtest':
         print('✅ Bot initialized for backtest mode')
-        file_path = CONFIG['ohlcv_file']
-        if os.path.exists(file_path):
-            raise ValueError('OHLCV_FILE must be set in env or config for backtest')
+        file_path = os.getenv('OHLCV_FILE')
+        print(f'Loading OHLCV data from {file_path}')
+        if not file_path or not os.path.exists(file_path):
+            raise ValueError('OHLCV_FILE must be set in env or config for backtest and point to an existing file')
+
         bot.run_from_file(file_path)
+    elif mode == 'forward_test':
+        print('✅ Bot initialized for forward_test mode')
     else:
-        api_key = CONFIG['binance_api_key']
-        api_secret = CONFIG['binance_api_secret']
-        testnet = CONFIG.get('binance_testnet', False)
+        print('✅ Bot initialized for live mode')
+        api_key = os.getenv('API_KEY')
+        api_secret = os.getenv('API_SECRET')
+        testnet = os.getenv('TESTNET', False)
         spot, futures = create_exchanges(api_key, api_secret, testnet)
-        bot.set_exchanges(spot, futures, symbol)
+        bot.set_exchanges(spot, futures, spot_symbol=spot_symbol, future_symbol=futures_symbol, mode=mode)
 
         # Warm-up
-        limit = CONFIG.get('warmup_limit', 1000)
-        interval = CONFIG.get('timeframe', '1h')
-        df_hist = spot.fetch_ohlcv(symbol, interval, limit=limit)
+        limit = os.getenv('WARMUP_LIMIT', 1000)
+        interval = os.getenv('TIMEFRAME', '1h')
+        df_hist = spot.fetch_ohlcv(spot_symbol, interval, limit=limit)
         df = pd.DataFrame(df_hist, columns=['Time','Open','High','Low','Close','Volume'])
         df['Time'] = pd.to_datetime(df['Time'], unit='ms')
         df.set_index('Time', inplace=True)
         bot.bootstrap(df)
         print('✅ Bot initialized for live mode')
 
-    ws_symbol = CONFIG['ws_symbol'].replace("/", "").lower()
-    uri = f"wss://stream.binance.com:9443/ws/{ws_symbol}@kline_{CONFIG['ws_timeframe']}"
+    ws_symbol = os.getenv("WS_SYMBOL").replace("/", "").lower()
+    uri = f"wss://stream.binance.com:9443/ws/{ws_symbol}@kline_{os.getenv("ws_timeframe")}"
     await connect_and_listen(uri, bot)
 
 async def connect_and_listen(uri, strat):

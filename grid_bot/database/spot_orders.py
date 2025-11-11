@@ -8,31 +8,33 @@ class SpotOrders(BaseMySQLRepo):
     CRUD operations for spot_orders table.
     """
 
-    def _init_schema(self) -> None:
-        conn = self.get_conn()
+    def __init__(self) -> None:
+        conn = self._get_conn()
         cursor = conn.cursor()
         # Create spot_orders table if not exists
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS spot_orders (
-                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-                order_id             INTEGER NOT NULL UNIQUE,
-                client_order_id      TEXT,
-                grid_id              REAL    NOT NULL,
-                symbol               TEXT    NOT NULL,
-                status               TEXT    NOT NULL,
-                type                 TEXT    NOT NULL,
-                side                 TEXT    NOT NULL,
-                price                REAL    NOT NULL,
-                avg_price            REAL    NOT NULL DEFAULT 0,
-                orig_qty             REAL    NOT NULL,
-                executed_qty         REAL    NOT NULL,
-                cummulative_quote_qty REAL   NOT NULL DEFAULT 0,
-                time_in_force        TEXT,
-                stop_price           REAL    NOT NULL DEFAULT 0,
-                iceberg_qty          REAL    NOT NULL DEFAULT 0,
-                time                 INTEGER NOT NULL,
-                update_time          INTEGER NOT NULL,
-                is_working           INTEGER NOT NULL DEFAULT 1
+                id                     BIGINT AUTO_INCREMENT PRIMARY KEY,
+                order_id               VARCHAR(64)  NOT NULL,
+                client_order_id        VARCHAR(64),
+                grid_id                VARCHAR(64)  NOT NULL,
+                symbol                 VARCHAR(32)  NOT NULL,
+                status                 VARCHAR(32)  NOT NULL,
+                type                   VARCHAR(32)  NOT NULL,
+                side                   VARCHAR(8)   NOT NULL,
+                price                  DOUBLE       NOT NULL,
+                avg_price              DOUBLE       DEFAULT 0,
+                orig_qty               DOUBLE       DEFAULT 0,
+                executed_qty           DOUBLE       DEFAULT 0,
+                cummulative_quote_qty  DOUBLE       DEFAULT 0,
+                time_in_force          VARCHAR(16),
+                stop_price             DOUBLE       DEFAULT 0,
+                iceberg_qty            DOUBLE       DEFAULT 0,
+                time                   DATETIME DEFAULT CURRENT_TIMESTAMP,
+                update_time            DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                is_working             TINYINT(1)   DEFAULT 1,
+                INDEX idx_spot_orders_symbol (symbol),
+                INDEX idx_spot_orders_time (time)
             )
         """)
 
@@ -65,14 +67,14 @@ class SpotOrders(BaseMySQLRepo):
         Insert a new spot order. Returns the internal row id.
         """
         cols = [
-            "order_id", "client_order_id", "symbol", "status", "type", "side", "price", 
+            "order_id", "client_order_id", "grid_id", "symbol", "status", "type", "side", "price", 
             "avg_price", "orig_qty", "executed_qty", "cummulative_quote_qty", "time_in_force", 
             "stop_price", "iceberg_qty", "time", "update_time", "is_working"
         ]
-        placeholders = ", ".join("?" for _ in cols)
+        placeholders = ", ".join("%s" for _ in cols)
         values = [data.get(col) for col in cols]
 
-        conn = self.get_conn()
+        conn = self._get_conn()
         cursor = conn.cursor()
         cursor.execute(
             f"INSERT INTO spot_orders ({', '.join(cols)}) VALUES ({placeholders})",

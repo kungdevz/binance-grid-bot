@@ -8,7 +8,7 @@ class Logger(BaseMySQLRepo):
     Simple logger: prints to console in dev, saves to DB in production.
     """
     def __init__(self):
-        super().__init__()       # ✅ initializes connection pool
+        super().__init__()       # initializes connection pool
         self._ensure_table()     # safe place to use DB (open/close)
     
     def _ensure_table(self):

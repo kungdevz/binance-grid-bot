@@ -36,5 +36,5 @@ class BaseMySQLRepo:
             )
 
     def _get_conn(self):
-        """Get pooled connection"""
+        """ Get pooled connection """
         return BaseMySQLRepo._pool.get_connection()

@@ -9,8 +9,7 @@ class TestGridInit(unittest.TestCase):
         self.strategy = strategy(
             symbol='None',
             atr_period=14,
-            atr_mean_window=100,
-            ema_periods=[9, 21, 50]
+            atr_mean_window=100        
         )
         self.spacing_size = 0.5
         self.grid_levels = 5

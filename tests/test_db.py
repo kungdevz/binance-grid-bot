@@ -10,8 +10,7 @@ class TestDB(unittest.TestCase):
         self.strategy = strategy(
             symbol='None',
             atr_period=14,
-            atr_mean_window=100,
-            ema_periods=[9, 21, 50]
+            atr_mean_window=100
         )
 
     def tearDown(self):
@@ -52,12 +51,12 @@ class TestDB(unittest.TestCase):
             "ema_200": 64000.0
         }
 
-        self.strategy.ohlcv.insert_ohlcv_data(ohlcv)
-        loaded_ohlcv = self.strategy.ohlcv.get_recent_ohlcv(symbol='BTCUSDT', limit=1)[0]
+        self.strategy.ohlcv_db.insert_ohlcv_data(ohlcv)
+        loaded_ohlcv = self.strategy.ohlcv_db.get_recent_ohlcv(symbol='BTCUSDT', limit=1)[0]
         self.assertEqual(loaded_ohlcv['close_price'], 65200.0)
 
-        self.strategy.ohlcv.delete_ohlcv_data(symbol='BTCUSDT', timestamp=1730035200000)
-        self.assertEqual(len(self.strategy.ohlcv.get_recent_ohlcv_by_timestamp(symbol='BTCUSDT', timestamp=1730035200000)), 0)
+        self.strategy.ohlcv_db.delete_ohlcv_data(symbol='BTCUSDT', timestamp=1730035200000)
+        self.assertEqual(len(self.strategy.ohlcv_db.get_recent_ohlcv_by_timestamp(symbol='BTCUSDT', timestamp=1730035200000)), 0)
 
 if __name__ == '__main__':
     unittest.main()

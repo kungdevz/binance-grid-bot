@@ -12,9 +12,9 @@ class TestSpacingSize(unittest.TestCase):
     def setUp(self):
         self.strategy = strategy(
             symbol='None',
+            futures_symbol='None',
             atr_period=14,
-            atr_mean_window=100,
-            ema_periods=[9, 21, 50]
+            atr_mean_window=100
         )
         self.define_spacing_size = strategy.define_spacing_size
 
@@ -30,7 +30,7 @@ class TestSpacingSize(unittest.TestCase):
         return pd.DataFrame(rows, columns=["High", "Low", "Close"])
 
     def test_spacing_size_normal_case(self):
-        atr_period = 5
+        atr_period = 14
         self.df = pd.DataFrame({
             'High': [10, 12, 11, 13, 15, 14],
             'Low': [8, 9, 10, 11, 12, 13],

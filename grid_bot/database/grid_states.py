@@ -41,13 +41,13 @@ class GridState(BaseMySQLRepo):
         conn.commit()
         conn.close()
 
-    def load_state_with_use_flgs(self, use_flgs: str = "Y") -> List[Dict[str, Any]]:
+    def load_state_with_use_flgs(self, symbol,  use_flgs: str = "Y") -> List[Dict[str, Any]]:
         conn = self._get_conn()
         cursor = conn.cursor(dictionary=True)
         try:
             cursor.execute(
-                "SELECT * FROM grid_state WHERE use_status = %s ORDER BY grid_price ASC",
-                (use_flgs,),
+                "SELECT * FROM grid_state WHERE symbol = %s and use_status = %s ORDER BY grid_price ASC",
+                (symbol, use_flgs),
             )
             rows = cursor.fetchall()
             return rows

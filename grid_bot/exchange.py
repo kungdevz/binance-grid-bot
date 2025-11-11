@@ -1,37 +1,51 @@
-import ccxt
+import ccxt, os
 from typing import Dict, List, Any
 from datetime import datetime
 import grid_bot.utils.util as util
-
-def create_exchanges(api_key: str, api_secret: str, testnet: bool = False):
-    spot = ccxt.binance({
-        'apiKey': api_key,
-        'secret': api_secret,
-        'enableRateLimit': True,
-        'options': {'defaultType': 'spot', 'adjustForTimeDifference': True}
-    })
-
-    futures = ccxt.binance({
-        'apiKey': api_key,
-        'secret': api_secret,
-        'enableRateLimit': True,
-        'options': {'defaultType': 'future', 'adjustForTimeDifference': True}
-    })
-
-    if testnet:
-        spot.set_sandbox_mode(True)
-        futures.set_sandbox_mode(True)
-    
-    return spot, futures
 
 class ExchangeSync:
     """
     Sync grid state and orders with exchange.
     """
-    def __init__(self, spot: Any, symbol: str, mode: str = 'forward_test'):
+    def __init__(self, spot: Any, symbol: str, symbol_future: str, mode: str = 'forward_test'):
         self.spot = spot
         self.symbol = symbol
-        self.mode = mode
+        self.symbol_futures = symbol_future
+        if mode == 'live':
+            apikey = os.getenv("API_SPOT_KEY")
+            secret = os.getenv("API_SPOT_SECRET")
+            self.spot, self.futures = self.create_exchanges(apikey, secret, testnet=False)
+        elif mode == 'forward_test':
+            apikey = os.getenv("API_TEST_KEY_SPOT")
+            secret = os.getenv("API_TEST_SECRET")
+            api_kery_future = os.getenv("API_TEST_KEY_FUTURE")
+            secret_future = os.getenv("API_TEST_SECRET_FUTURE")
+            self.spot, self.futures = self.create_exchanges(apikey, secret, testnet=True)
+        else:
+            self.spot = spot
+            self.futures = None
+
+    def create_exchanges(api_key: str, api_secret: str, testnet: bool = False):
+
+        spot = ccxt.binance({
+            'apiKey': api_key,
+            'secret': api_secret,
+            'enableRateLimit': True,
+            'options': {'defaultType': 'spot', 'adjustForTimeDifference': True}
+        })
+
+        futures = ccxt.binance({
+            'apiKey': api_key,
+            'secret': api_secret,
+            'enableRateLimit': True,
+            'options': {'defaultType': 'future', 'adjustForTimeDifference': True}
+        })
+
+        if testnet:
+            spot.set_sandbox_mode(True)
+            futures.set_sandbox_mode(True)
+        
+        return spot, futures
 
     def sync_grid_state(self, grid_prices: List[float]) -> Dict[float, bool]:
         state = {p: False for p in grid_prices}
