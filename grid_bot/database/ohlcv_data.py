@@ -13,10 +13,10 @@ class OhlcvData(BaseMySQLRepo):
             CREATE TABLE IF NOT EXISTS ohlcv_data (
                 symbol        VARCHAR(20)   NOT NULL,
                 timestamp     BIGINT        NOT NULL,
-                open_price    DOUBLE        NOT NULL,
-                high_price    DOUBLE        NOT NULL,
-                low_price     DOUBLE        NOT NULL,
-                close_price   DOUBLE        NOT NULL,
+                open          DOUBLE        NOT NULL,
+                high          DOUBLE        NOT NULL,
+                low           DOUBLE        NOT NULL,
+                close         DOUBLE        NOT NULL,
                 volume        DOUBLE        NOT NULL,
                 tr            DOUBLE        NOT NULL,
                 atr_14        DOUBLE        NOT NULL,
@@ -44,7 +44,7 @@ class OhlcvData(BaseMySQLRepo):
         cursor.close()
         conn.close()
 
-    def insert_ohlcv_data(self, symbol, timestamp, open, high, low, close, volume, tr, atr_value, ema: dict) -> int:
+    def insert_ohlcv_data(self, symbol, timestamp, open, high, low, close, volume, tr, atr_14, atr_28, ema: dict) -> int:
 
         try:
 
@@ -53,14 +53,16 @@ class OhlcvData(BaseMySQLRepo):
 
             insert_sql = '''
                 INSERT INTO ohlcv_data(
-                    symbol, timestamp, open_price, high_price, low_price, close_price, volume,
-                    tr, atr_14, ema_14, ema_28, ema_50, ema_100, ema_200
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    symbol, timestamp, open, high, low, close, volume,
+                    tr, atr_14, atr_28, 
+                    ema_14, ema_28, ema_50, ema_100, ema_200
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             '''
 
             cursor.execute(insert_sql, (
-                symbol, timestamp, open, high, low, close, volume, tr, atr_value, ema["ema_14"], ema["ema_28"],
-                ema["ema_50"], ema["ema_100"], ema["ema_200"]
+                symbol, timestamp, open, high, low, close, volume,
+                tr, atr_14, atr_28,
+                ema["ema_14"], ema["ema_28"], ema["ema_50"], ema["ema_100"], ema["ema_200"]
             ))
 
             conn.commit()
@@ -139,10 +141,7 @@ class OhlcvData(BaseMySQLRepo):
         cursor = conn.cursor(dictionary=True)
 
         query = '''
-            SELECT timestamp, open_price, high_price, low_price, 
-                close_price, volume, tr, atr_14, atr_28, ema_14, 
-                ema_28, ema_50, ema_100, ema_200
-            FROM ohlcv_data
+            SELECT * FROM ohlcv_data
             WHERE symbol = %s
             ORDER BY timestamp DESC
             LIMIT %s

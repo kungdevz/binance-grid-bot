@@ -1,4 +1,5 @@
 import threading
+from decimal import Decimal, ROUND_DOWN
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -7,6 +8,14 @@ _sequence_lock = threading.Lock()
 _sequence = 0
 
 OrderAction = Literal['BUY', 'SELL', 'HEDGE_OPEN', 'HEDGE_CLOSE']
+
+def to_exchange_amount(amount_dec: Decimal, precision: int) -> float:
+    step = Decimal("1").scaleb(-precision)  # 10^-precision
+    return float(amount_dec.quantize(step, rounding=ROUND_DOWN))
+
+def to_exchange_price(price_dec: Decimal, precision: int) -> float:
+    step = Decimal("1").scaleb(-precision)
+    return float(price_dec.quantize(step, rounding=ROUND_DOWN))
 
 def generate_order_id(action: OrderAction) -> str:
     """

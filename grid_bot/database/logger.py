@@ -10,6 +10,7 @@ class Logger(BaseMySQLRepo):
     def __init__(self):
         super().__init__()       # initializes connection pool
         self._ensure_table()     # safe place to use DB (open/close)
+        self.env = os.getenv("ENVIRONMENT", "development")
     
     def _ensure_table(self):
         conn = self._get_conn()  # ✅ use _get_conn(), not super()._get_conn()
@@ -27,9 +28,11 @@ class Logger(BaseMySQLRepo):
         cursor.close()
         conn.close()
 
+       
+
     def log(self, message: str, level: str = "INFO", env: str = None):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        if env == "development":
+        if self.env == "development":
             print(f"[{ts}] [{level}] {message}")
         else:
             conn = self._get_conn()
