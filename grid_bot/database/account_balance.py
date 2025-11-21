@@ -3,7 +3,6 @@ from typing import Dict, Any, Optional, List
 
 from grid_bot.database.base_database import BaseMySQLRepo
 
-
 class AccountBalance(BaseMySQLRepo):
     """
     Handles persistence of account balances using Mysql.

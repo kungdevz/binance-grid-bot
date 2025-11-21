@@ -1,13 +1,12 @@
 # base_strategy.py
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
-
+from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import numpy as np
 
+from grid_bot.interface.io_interface import IGridIO
 from grid_bot.database.grid_states import GridState
 from grid_bot.database.ohlcv_data import OhlcvData
 from grid_bot.database.spot_orders import SpotOrders
@@ -18,7 +17,8 @@ from grid_bot.database.logger import Logger
 from grid_bot.datas.position import Position
 import grid_bot.utils.util as util
 
-class BaseGridStrategy(ABC):
+
+class BaseGridStrategy(IGridIO):
     """
     Base class : รวม logic ที่ใช้ร่วมกันสำหรับ Live และ Backtest
     ไม่ผูกกับ ccxt หรือ exchange ใด ๆ โดยตรง
@@ -41,111 +41,68 @@ class BaseGridStrategy(ABC):
         self.mode = mode
 
         # Money
-        self.initial_capital   = float(initial_capital)
-        self.reserve_ratio     = float(reserve_ratio)
-        self.order_size_usdt   = float(order_size_usdt)
-        self.total_capital     = float(initial_capital)
-        self.reserve_capital   = self.total_capital * self.reserve_ratio
+        self.initial_capital = float(initial_capital)
+        self.reserve_ratio = float(reserve_ratio)
+        self.order_size_usdt = float(order_size_usdt)
+        self.total_capital = float(initial_capital)
+        self.reserve_capital = self.total_capital * self.reserve_ratio
         self.available_capital = self.total_capital - self.reserve_capital
 
         # Grid config
-        self.grid_levels     = int(grid_levels)
-        self.atr_multiplier  = float(atr_multiplier)
+        self.grid_levels = int(grid_levels)
+        self.atr_multiplier = float(atr_multiplier)
         self.grid_prices: List[float] = []
-        self.grid_filled: Dict[float, bool] = {}       # grid_price -> bool
+        self.grid_filled: Dict[float, bool] = {}  # grid_price -> bool
         self.grid_group_id: Optional[str] = None
-        self.grid_spacing: float = 0.0                 # ระยะห่าง grid ปัจจุบัน (ใช้ทั้ง init+recalc)
+        self.grid_spacing: float = 0.0  # ระยะห่าง grid ปัจจุบัน (ใช้ทั้ง init+recalc)
 
         # tuning parameter สำหรับ recalc
-        self.vol_up_ratio: float = 1.5    # ATR14 > ATR28 * 1.5 → ถือว่าผันผวนสูง
+        self.vol_up_ratio: float = 1.5  # ATR14 > ATR28 * 1.5 → ถือว่าผันผวนสูง
         self.vol_down_ratio: float = 0.7  # ATR14 < ATR28 * 0.7 → ถือว่านิ่งลง
-        self.drift_k: float = 2.5         # price เลยกรอบเดิม k ช่อง → recenter ใหม่
+        self.drift_k: float = 2.5  # price เลยกรอบเดิม k ช่อง → recenter ใหม่
 
         # state runtime
         self.positions: List[Position] = []
         self.realized_grid_profit: float = 0.0
         self.prev_close: Optional[float] = None
 
+        # ==== HEDGE CONFIG (เน้นรักษาเงินต้น) ====
+        self.hedge_size_ratio: float = 0.5  # hedge 50% ของ net spot เป็นเป้า max
+        self.hedge_leverage: int = 2  # leverage ฝั่ง futures (เอาไปใช้ใน I/O layer)
+        self.hedge_open_k_atr: float = 0.5  # เปิด hedge เพิ่มเมื่อหลุด lowest - 0.5*ATR
+        self.hedge_tp_ratio: float = 0.5  # TP hedge เมื่อกำไร hedge ~ 50% ของ spot unrealized loss
+        self.hedge_sl_ratio: float = 0.3  # SL hedge เมื่อขาดทุน ~ 30% ของ spot unrealized loss
+        self.min_hedge_notional: float = 5.0  # notional ขั้นต่ำของ hedge (กัน dust)
+
+        # EMA ที่ใช้ filter
+        self.ema_fast_period: int = 14
+        self.ema_mid_period: int = 50
+        self.ema_slow_period: int = 200
+
+        # เก็บสถานะ hedge ปัจจุบัน (short futures)
+        # {"qty": float, "entry": float, "timestamp": int}
+        self.hedge_position: Optional[dict] = None
+
+        # symbol ฝั่ง futures (ถ้าไม่เหมือน spot ค่อย override ใน subclass)
+        self.futures_symbol: str = self.symbol
+
         # DB
-        self.grid_db        = GridState()
-        self.ohlcv_db       = OhlcvData()
+        self.grid_db = GridState()
+        self.ohlcv_db = OhlcvData()
         self.spot_orders_db = SpotOrders()
-        self.futures_db     = FuturesOrders()
+        self.futures_db = FuturesOrders()
         self.acc_balance_db = AccountBalance()
 
         self.logger = logger or Logger()
         self.logger.log(
             f"[BaseGridStrategy] Init mode={mode}, symbol={symbol}, capital={self.total_capital}",
-            level="INFO"
+            level="INFO",
         )
 
     # ------------------------------------------------------------------
-    # Abstract “I/O” methods – ให้ subclass ไป implement
-    # ------------------------------------------------------------------
-
-    @abstractmethod
-    def _io_place_spot_buy(
-        self,
-        timestamp_ms: int,
-        price: float,
-        qty: float,
-        grid_id: str,
-    ) -> Dict[str, Any]:
-        """
-        ให้ subclass live/backtest ไป implement:
-        - live: เรียก ExchangeSync.place_limit_buy + เขียน DB
-        - backtest: จำลอง fill ทันที + เขียน DB (ถ้าต้องการ)
-        return: ข้อมูล order ที่อยากเก็บ (order_id ฯลฯ)
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def _io_place_spot_sell(
-        self,
-        timestamp_ms: int,
-        position: Position,
-        sell_price: float,
-    ) -> Dict[str, Any]:
-        """
-        ให้ subclass ไป implement:
-        - live: ยิง sell ไปที่ exchange (limit/market แล้วแต่ design)
-        - backtest: จำลอง fill ทันที
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def _io_open_hedge(self,
-        timestamp_ms: int,
-        notional_usdt: float,
-        price: float,
-    ) -> Optional[Dict[str, Any]]:
-        """เปิด short hedge (ใช้ได้เฉพาะบางโหมด หรือ backtest จะ simulate ก็ได้)"""
-        raise NotImplementedError
-
-    @abstractmethod
-    def _io_close_hedge(
-        self,
-        timestamp_ms: int,
-    ) -> Optional[Dict[str, Any]]:
-        """ปิด short hedge ทั้งหมด หรือบางส่วน ตาม logic ของ subclass"""
-        raise NotImplementedError
-    
-    @abstractmethod
-    def _run(
-        self, 
-        timestamp_ms: int
-    ) -> None:
-        raise NotImplementedError
-    
-    # ------------------------------------------------------------------
     # Common Logic
     # ------------------------------------------------------------------
-    def _calc_tr_single(
-        self,
-        high: float,
-        low: float,
-        prev_close: Optional[float],
-    ) -> float:
+    def _calc_tr_single(self, high: float, low: float, prev_close: Optional[float]) -> float:
         """
         True Range (TR) ต่อ 1 แท่ง:
         TR = max(H-L, |H-Cp|, |L-Cp|)
@@ -156,15 +113,10 @@ class BaseGridStrategy(ABC):
 
         tr1 = high - low
         tr2 = abs(high - prev_close)
-        tr3 = abs(low  - prev_close)
+        tr3 = abs(low - prev_close)
         return float(max(tr1, tr2, tr3))
 
-    def _calc_atr_from_history(
-        self,
-        tr_hist: List[float],
-        tr_current: float,
-        periods: Tuple[int, ...] = (14, 28),
-    ) -> Dict[int, float]:
+    def _calc_atr_from_history(self, tr_hist: List[float], tr_current: float, periods: Tuple[int, ...] = (14, 28)) -> Dict[int, float]:
         """
         คำนวณ ATR หลาย period จาก
         - tr_hist: list ของ TR ย้อนหลัง
@@ -179,13 +131,8 @@ class BaseGridStrategy(ABC):
             atr_values[p] = float(np.mean(window)) if window else 0.0
 
         return atr_values
-    
-    def _calc_ema_from_history(
-        self,
-        hist: pd.DataFrame,
-        close: float,
-        periods: Tuple[int, ...] = (14, 28, 50, 100, 200),
-    ) -> Dict[str, float]:
+
+    def _calc_ema_from_history(self, hist: pd.DataFrame, close: float, periods: Tuple[int, ...] = (14, 28, 50, 100, 200)) -> Dict[str, float]:
         """
         คำนวณ EMA หลาย period จากข้อมูลแท่งล่าสุดใน hist + close ปัจจุบัน
         ถ้ายังไม่มีค่า EMA เดิม → ใช้ close ปัจจุบันเป็นค่าเริ่มต้น
@@ -209,15 +156,8 @@ class BaseGridStrategy(ABC):
                 ema_values[col_name] = float(alpha * close + (1 - alpha) * prev_val)
 
         return ema_values
-    
-    from typing import Dict, Tuple
 
-    def _calc_atr_ema_from_df(
-        self,
-        df: pd.DataFrame,
-        atr_periods: Tuple[int, ...] = (14, 28),
-        ema_periods: Tuple[int, ...] = (14, 28, 50, 100, 200),
-    ) -> Dict[str, float]:
+    def _calc_atr_ema_from_df(self, df: pd.DataFrame, atr_periods: Tuple[int, ...] = (14, 28), ema_periods: Tuple[int, ...] = (14, 28, 50, 100, 200)) -> Dict[str, float]:
         """
         รับ df (ที่มี high, low, close ครบ และรวมแท่งปัจจุบันแล้ว)
         คืนค่าตัวชี้วัดล่าสุดของแท่งสุดท้าย:
@@ -256,7 +196,7 @@ class BaseGridStrategy(ABC):
             result[f"ema_{p}"] = ema_last
 
         return result
-    
+
     def _calc_tr_series(self, df: pd.DataFrame) -> pd.Series:
         """
         คืนค่า pandas Series ของ TR สำหรับทุกแท่งใน df
@@ -266,8 +206,8 @@ class BaseGridStrategy(ABC):
         if df.empty:
             return pd.Series(dtype=float)
 
-        high  = df["high"].astype(float)
-        low   = df["low"].astype(float)
+        high = df["high"].astype(float)
+        low = df["low"].astype(float)
         close = df["close"].astype(float)
 
         # previous close
@@ -286,16 +226,7 @@ class BaseGridStrategy(ABC):
 
         return tr
 
-    def _calc_atr_ema(
-        self,
-        timestamp: float,
-        open: float,
-        close: float,
-        high: float,
-        low: float,
-        volume: float,
-        hist_df: Optional[pd.DataFrame] = None,
-    ) -> int:
+    def _calc_atr_ema(self, timestamp: float, open: float, close: float, high: float, low: float, volume: float, hist_df: Optional[pd.DataFrame] = None) -> int:
         """
         Engine กลางสำหรับ:
         - TR
@@ -321,14 +252,16 @@ class BaseGridStrategy(ABC):
                     hist[c] = hist[c].astype(float)
 
             current_row = pd.DataFrame(
-                [{
-                    "open":   float(open),
-                    "high":   float(high),
-                    "low":    float(low),
-                    "close":  float(close),
-                    "volume": float(volume),
-                }],
-                index=[timestamp],   # ใช้ timestamp เป็น index
+                [
+                    {
+                        "open": float(open),
+                        "high": float(high),
+                        "low": float(low),
+                        "close": float(close),
+                        "volume": float(volume),
+                    }
+                ],
+                index=[timestamp],  # ใช้ timestamp เป็น index
             )
 
             df_src = pd.concat([hist, current_row], axis=0)
@@ -337,14 +270,16 @@ class BaseGridStrategy(ABC):
             hist = self.ohlcv_db.get_recent_ohlcv(self.symbol, 200)
 
             current_row = pd.DataFrame(
-                [{
-                    "time":   timestamp,
-                    "open":   float(open),
-                    "high":   float(high),
-                    "low":    float(low),
-                    "close":  float(close),
-                    "volume": float(volume),
-                }]
+                [
+                    {
+                        "time": timestamp,
+                        "open": float(open),
+                        "high": float(high),
+                        "low": float(low),
+                        "close": float(close),
+                        "volume": float(volume),
+                    }
+                ]
             ).set_index("time")
 
             if hist is not None and not hist.empty:
@@ -362,12 +297,12 @@ class BaseGridStrategy(ABC):
         # ------------------------------------------------------------------
         vals = self._calc_atr_ema_from_df(df_src)
 
-        tr      = float(vals["tr"])
-        atr_14  = float(vals["atr_14"])
-        atr_28  = float(vals["atr_28"])
-        ema_14  = float(vals["ema_14"])
-        ema_28  = float(vals["ema_28"])
-        ema_50  = float(vals["ema_50"])
+        tr = float(vals["tr"])
+        atr_14 = float(vals["atr_14"])
+        atr_28 = float(vals["atr_28"])
+        ema_14 = float(vals["ema_14"])
+        ema_28 = float(vals["ema_28"])
+        ema_50 = float(vals["ema_50"])
         ema_100 = float(vals["ema_100"])
         ema_200 = float(vals["ema_200"])
 
@@ -375,141 +310,131 @@ class BaseGridStrategy(ABC):
         # 3) INSERT ลง DB (1 row ของแท่งปัจจุบัน)
         # ------------------------------------------------------------------
         rowcount = self.ohlcv_db.insert_ohlcv_data(
-            symbol   = self.symbol,
-            timestamp= int(timestamp),
-            open     = float(open),
-            high     = float(high),
-            low      = float(low),
-            close    = float(close),
-            volume   = float(volume),
-            tr       = float(tr),
-            atr_14   = float(atr_14),
-            atr_28   = float(atr_28),
-            ema_14   = float(ema_14),
-            ema_28   = float(ema_28),
-            ema_50   = float(ema_50),
-            ema_100  = float(ema_100),
-            ema_200  = float(ema_200),
+            symbol=self.symbol,
+            timestamp=int(timestamp),
+            open=float(open),
+            high=float(high),
+            low=float(low),
+            close=float(close),
+            volume=float(volume),
+            tr=float(tr),
+            atr_14=float(atr_14),
+            atr_28=float(atr_28),
+            ema_14=float(ema_14),
+            ema_28=float(ema_28),
+            ema_50=float(ema_50),
+            ema_100=float(ema_100),
+            ema_200=float(ema_200),
         )
 
         return rowcount
-    
-    def _maybe_recenter_grid(
-            self,
-            timestamp_ms: int,
-            price: float,
-            atr_14: float,
-            atr_28: float,
-        ) -> None:
-            """
-            Hard rebuild:
-            - เมื่อราคาออกนอกกรอบเดิมหลายช่อง หรือกริดถูกใช้ไปเกือบหมด
-            - จะเลื่อนหน้าต่าง grid ให้ไปอยู่ใกล้ราคาปัจจุบันมากขึ้น (lower-only grid)
-            """
-            if not self.grid_prices:
-                return
 
-            spacing = self.grid_spacing
-            if spacing <= 0 and len(self.grid_prices) >= 2:
-                spacing = float(self.grid_prices[1] - self.grid_prices[0])
-            if spacing <= 0 and atr_14 > 0:
-                spacing = atr_14 * self.atr_multiplier
-            if spacing <= 0:
-                # ไม่มีข้อมูลพอจะตัดสินใจ
-                return
+    def _maybe_recenter_grid(self, timestamp_ms: int, price: float, atr_14: float, atr_28: float) -> None:
+        """
+        Hard rebuild:
+        - เมื่อราคาออกนอกกรอบเดิมหลายช่อง หรือกริดถูกใช้ไปเกือบหมด
+        - จะเลื่อนหน้าต่าง grid ให้ไปอยู่ใกล้ราคาปัจจุบันมากขึ้น (lower-only grid)
+        """
+        if not self.grid_prices:
+            return
 
-            lowest = min(self.grid_prices)
-            highest = max(self.grid_prices)
+        spacing = self.grid_spacing
+        if spacing <= 0 and len(self.grid_prices) >= 2:
+            spacing = float(self.grid_prices[1] - self.grid_prices[0])
+        if spacing <= 0 and atr_14 > 0:
+            spacing = atr_14 * self.atr_multiplier
+        if spacing <= 0:
+            # ไม่มีข้อมูลพอจะตัดสินใจ
+            return
 
-            # ดูว่าใช้ grid ไปแล้วกี่ level
-            filled_levels = sum(1 for p in self.grid_prices if self.grid_filled.get(p, False))
-            fill_ratio = filled_levels / len(self.grid_prices) if self.grid_prices else 0.0
+        lowest = min(self.grid_prices)
+        highest = max(self.grid_prices)
 
-            need_recenter = False
-            reason = ""
+        # ดูว่าใช้ grid ไปแล้วกี่ level
+        filled_levels = sum(1 for p in self.grid_prices if self.grid_filled.get(p, False))
+        fill_ratio = filled_levels / len(self.grid_prices) if self.grid_prices else 0.0
 
-            # 1) ราคาออกนอกกรอบหลายช่อง
-            if price > highest + spacing * self.drift_k:
-                need_recenter = True
-                reason = f"price above window (>{self.drift_k} * spacing)"
-            elif price < lowest - spacing * self.drift_k:
-                need_recenter = True
-                reason = f"price below window (>{self.drift_k} * spacing)"
+        need_recenter = False
+        reason = ""
 
-            # 2) ใช้ grid ไปเยอะมาก (เช่นซื้อฝั่งล่างเกือบหมด)
-            elif fill_ratio > 0.7:
-                need_recenter = True
-                reason = f"filled_levels={fill_ratio:.2%}"
+        # 1) ราคาออกนอกกรอบหลายช่อง
+        if price > highest + spacing * self.drift_k:
+            need_recenter = True
+            reason = f"price above window (>{self.drift_k} * spacing)"
+        elif price < lowest - spacing * self.drift_k:
+            need_recenter = True
+            reason = f"price below window (>{self.drift_k} * spacing)"
 
-            if not need_recenter:
-                return
+        # 2) ใช้ grid ไปเยอะมาก (เช่นซื้อฝั่งล่างเกือบหมด)
+        elif fill_ratio > 0.7:
+            need_recenter = True
+            reason = f"filled_levels={fill_ratio:.2%}"
 
-            # ----- สร้าง grid ใหม่รอบราคาปัจจุบัน -----
-            # center ใหม่: ใช้ price เป็นหลักก่อน (จะไปผูกกับ EMA50 ก็ได้)
-            new_center = float(price)
+        if not need_recenter:
+            return
 
-            # spacing ใหม่จาก ATR ปัจจุบัน
-            new_spacing = spacing
-            if atr_14 > 0:
-                new_spacing = atr_14 * self.atr_multiplier
+        # ----- สร้าง grid ใหม่รอบราคาปัจจุบัน -----
+        # center ใหม่: ใช้ price เป็นหลักก่อน (จะไปผูกกับ EMA50 ก็ได้)
+        new_center = float(price)
 
-            if new_spacing <= 0:
-                new_spacing = spacing  # fallback
+        # spacing ใหม่จาก ATR ปัจจุบัน
+        new_spacing = spacing
+        if atr_14 > 0:
+            new_spacing = atr_14 * self.atr_multiplier
 
-            new_prices = [
-                round(new_center - new_spacing * (i + 1), 4)
-                for i in range(self.grid_levels)
-            ]
-            new_prices = sorted(new_prices)
+        if new_spacing <= 0:
+            new_spacing = spacing  # fallback
 
-            new_group_id = util.generate_order_id("INIT")
-            now = datetime.now()
-            now_date = now.strftime("%Y-%m-%d")
-            now_time = now.strftime("%H:%M:%S")
-            now_dt   = now.strftime("%Y-%m-%d %H:%M:%S")
+        new_prices = [round(new_center - new_spacing * (i + 1), 4) for i in range(self.grid_levels)]
+        new_prices = sorted(new_prices)
 
-            # เขียน state grid ใหม่ลง DB (ไม่ไปยุ่งของเก่า – แยก group_id)
-            for p in new_prices:
-                item = {
-                    "symbol":     self.symbol,
-                    "grid_price": float(p),
-                    "use_status": "Y",
-                    "group_id":   new_group_id,
-                    "base_price": float(new_center),
-                    "spacing":    float(new_spacing),
-                    "date":       now_date,
-                    "time":       now_time,
-                    "create_date": now_dt,
-                    "status":     "open",
-                }
-                try:
-                    self.grid_db.save_state(item)
-                except Exception as e:
-                    self.logger.log(f"[GRID] save_state error during recenter: {e}", level="ERROR")
+        new_group_id = util.generate_order_id("INIT")
+        now = datetime.now()
+        now_date = now.strftime("%Y-%m-%d")
+        now_time = now.strftime("%H:%M:%S")
+        now_dt = now.strftime("%Y-%m-%d %H:%M:%S")
 
-            # อัปเดต runtime state ให้ใช้ชุดใหม่
-            self.grid_group_id = new_group_id
-            self.grid_prices   = new_prices
-            self.grid_spacing  = float(new_spacing)
-            self.grid_filled   = {p: False for p in new_prices}
+        # เขียน state grid ใหม่ลง DB (ไม่ไปยุ่งของเก่า – แยก group_id)
+        for p in new_prices:
+            item = {
+                "symbol": self.symbol,
+                "grid_price": float(p),
+                "use_status": "Y",
+                "group_id": new_group_id,
+                "base_price": float(new_center),
+                "spacing": float(new_spacing),
+                "date": now_date,
+                "time": now_time,
+                "create_date": now_dt,
+                "status": "open",
+            }
+            try:
+                self.grid_db.save_state(item)
+            except Exception as e:
+                self.logger.log(f"[GRID] save_state error during recenter: {e}", level="ERROR")
 
-            self.logger.log(
-                f"[GRID] recentered around {new_center} (reason={reason}), "
-                f"spacing={new_spacing}, prices={new_prices}",
-                level="INFO",
-            )
+        # อัปเดต runtime state ให้ใช้ชุดใหม่
+        self.grid_group_id = new_group_id
+        self.grid_prices = new_prices
+        self.grid_spacing = float(new_spacing)
+        self.grid_filled = {p: False for p in new_prices}
 
-    def _recalc_spacing_if_needed(self, atr_14: float, atr_28: float) -> float:
+        self.logger.log(
+            f"[GRID] recentered around {new_center} (reason={reason}), " f"spacing={new_spacing}, prices={new_prices}",
+            level="INFO",
+        )
+
+    def _recalc_spacing_if_needed(self, atr_14: float, atr_28: float, curr_spacing: float) -> float:
         """
         Soft adjust spacing :
         - ใช้ ATR14 เทียบกับ ATR28 เพื่อตัดสินใจว่าจะขยาย/หด grid หรือไม่
         - ถ้าไม่เปลี่ยนถือว่าใช้ spacing เดิม
         """
         if atr_14 <= 0 or atr_28 <= 0 or not self.grid_prices:
-            return self.grid_spacing
+            return curr_spacing
 
         # old_spacing: ใช้อันที่เคยเซ็ตไว้ ถ้าไม่มีลองคำนวณจาก grid จริง
-        old_spacing = self.grid_spacing
+        old_spacing = curr_spacing
         if old_spacing <= 0 and len(self.grid_prices) >= 2:
             old_spacing = float(self.grid_prices[1] - self.grid_prices[0])
 
@@ -527,24 +452,19 @@ class BaseGridStrategy(ABC):
             # ตลาดสงบ → หด grid ลง
             new_spacing = atr_14 * self.atr_multiplier * 1.0
 
-        # ถ้าต่างไม่ถึง 20% จะไม่ปรับ เพื่อลด churn
-        if old_spacing > 0 and abs(new_spacing - old_spacing) / old_spacing < 0.2:
-            return old_spacing
-
-        self.grid_spacing = float(new_spacing)
+        grid_spacing = float(new_spacing)
         self.logger.log(
-            f"[GRID] spacing adjusted from {old_spacing:.4f} to {new_spacing:.4f} "
-            f"(ATR14={atr_14:.4f}, ATR28={atr_28:.4f})",
+            f"[GRID] spacing adjusted from {old_spacing:.4f} to {new_spacing:.4f} " f"(ATR14={atr_14:.4f}, ATR28={atr_28:.4f})",
             level="INFO",
         )
-        return self.grid_spacing
+        return grid_spacing
 
     def _init_lower_grid(self, base_price: float, atr: float) -> None:
         """
         Create LOWER-only grid (the requirement USDT-only buy low and sell high at the base price)
         """
         if atr <= 0:
-            spacing = base_price * 0.03  # fallback 3%, If the ATR value is less than 0 
+            spacing = base_price * 0.03  # fallback 3%, If the ATR value is less than 0
         else:
             spacing = atr * self.atr_multiplier
 
@@ -552,53 +472,40 @@ class BaseGridStrategy(ABC):
         self.grid_spacing = float(spacing)
 
         # คำนวณราคากริดด้านล่าง
-        self.grid_prices = [
-            round(base_price - spacing * (i + 1), 4)
-            for i in range(self.grid_levels)
-        ]
-        
+        self.grid_prices = [round(base_price - spacing * (i + 1), 4) for i in range(self.grid_levels)]
+
         self.grid_prices = sorted(self.grid_prices)
         self.grid_group_id = util.generate_order_id("INIT")
-        self.grid_filled   = {p: False for p in self.grid_prices}
+        self.grid_filled = {p: False for p in self.grid_prices}
 
-        now_date = datetime.now().strftime('%Y-%m-%d')
-        now_time = datetime.now().strftime('%H:%M:%S')
-        now_dt   = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now_date = datetime.now().strftime("%Y-%m-%d")
+        now_time = datetime.now().strftime("%H:%M:%S")
+        now_dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for price in self.grid_prices:
             item = {
-                'symbol': self.symbol,
-                'grid_price': price,
-                'use_status': 'Y',
-                'group_id': self.grid_group_id,
-                'base_price': float(base_price),
-                'spacing': float(spacing),
-                'date': now_date,
-                'time': now_time,
-                'create_date': now_dt,
-                'status': 'open',
+                "symbol": self.symbol,
+                "grid_price": price,
+                "use_status": "Y",
+                "group_id": self.grid_group_id,
+                "base_price": float(base_price),
+                "spacing": float(spacing),
+                "date": now_date,
+                "time": now_time,
+                "create_date": now_dt,
+                "status": "open",
             }
             self.grid_db.save_state(item)
 
         self.logger.log(
             f"Grid initialized (LOWER only) base={base_price}, group={self.grid_group_id}, prices={self.grid_prices}",
-            level="INFO"
+            level="INFO",
         )
 
-    # ------------------------------------------------------------------
-    # High-level event : on_bar / on_price
-    # ------------------------------------------------------------------
-    def on_bar(
-            self,
-            timestamp_ms: int,
-            open_price: float,
-            high: float,
-            low: float,
-            close: float,
-            volume: float,
-            hist_df: Optional[pd.DataFrame] = None,
-        ) -> None:
+    def on_bar(self, timestamp_ms: int, open_price: float, high: float, low: float, close: float, volume: float, hist_df: Optional[pd.DataFrame] = None) -> None:
 
-        # Calculate TR, ATR and EMA Indicator and INSERT into DB.
+        # ===============================================================
+        # 1) Update OHLCV + ATR/EMA → INSERT into DB
+        # ===============================================================
         self._calc_atr_ema(
             timestamp=timestamp_ms,
             open=open_price,
@@ -611,49 +518,60 @@ class BaseGridStrategy(ABC):
 
         price = float(close)
 
-        # 1) ดึง ATR ล่าสุดจาก ohlcv_data
+        # ===============================================================
+        # 2) Load latest indicator row
+        # ===============================================================
         last = self.ohlcv_db.get_recent_ohlcv(self.symbol, 1)
-        if not last.empty:
-            atr_14 = float(last.iloc[-1]["atr_14"])
-            atr_28 = float(last.iloc[-1]["atr_28"])
-        else:
-            atr_14 = 0.0
-            atr_28 = 0.0
+        if last is None or last.empty:
+            return
 
-        # 2) โหลด grid state จาก DB ถ้ายังไม่มีค่าใน memory
+        row = last.iloc[-1].to_dict()
+
+        atr_14 = float(row.get("atr_14", 0.0) or 0.0)
+        atr_28 = float(row.get("atr_28", 0.0) or 0.0)
+
+        # ===============================================================
+        # 3) Load grid state (from DB → memory)
+        # ===============================================================
         if not self.grid_prices:
             rows = self.grid_db.load_state_with_use_flgs(self.symbol, "Y")
             if rows:
-                self.grid_prices   = [float(r["grid_price"]) for r in rows]
+                self.grid_prices = [float(r["grid_price"]) for r in rows]
                 self.grid_group_id = rows[0]["group_id"]
-                # ถ้าไม่มี status ให้ default เป็น False
-                self.grid_filled = {
-                    float(r["grid_price"]): (r.get("status") == "open")
-                    for r in rows
-                }
-                # พยายามคาด spacing จากข้อมูลจริง
+
+                self.grid_filled = {float(r["grid_price"]): (r.get("status") == "open") for r in rows}
+
                 if len(self.grid_prices) >= 2:
                     self.grid_spacing = float(self.grid_prices[1] - self.grid_prices[0])
 
-        # 3) ถ้ายังไม่มี grid (ครั้งแรกจริง ๆ) → init จาก ATR
+        # ===============================================================
+        # 4) Init grid (first run) OR Recalc grid
+        # ===============================================================
         if not self.grid_prices:
             self._init_lower_grid(base_price=price, atr=atr_14)
         else:
-            # 3.1 ปรับ spacing ตาม volatility regime (soft adjust)
-            self._recalc_spacing_if_needed(atr_14=atr_14, atr_28=atr_28)
 
-            # 3.2 พิจารณาว่าควร recenter grid ใหม่ไหม (hard rebuild)
-            self._maybe_recenter_grid(
-                timestamp_ms=timestamp_ms,
-                price=price,
-                atr_14=atr_14,
-                atr_28=atr_28,
-            )
+            old_spacing = self.grid_spacing
+            new_spacing = self._recalc_spacing_if_needed(atr_14=atr_14, atr_28=atr_28)
 
-        # 4) Process buy / sell / hedge ต่อ
+            # ต้องต่างกันมากกว่า 20% ถึงจะปรับ น้อยกว่านั้นจะไม่ปรับ เพื่อลด churn
+            if old_spacing > 0 and abs(new_spacing - old_spacing) / old_spacing > 0.2:
+                self.grid_spacing = new_spacing
+                self._maybe_recenter_grid(
+                    timestamp_ms=timestamp_ms,
+                    price=price,
+                    atr_14=atr_14,
+                    atr_28=atr_28,
+                )
+
+        # ===============================================================
+        # 5) Process BUY / SELL / HEDGE
+        # ===============================================================
         self._process_buy_grid(timestamp_ms, price)
         self._process_sell_grid(timestamp_ms, price)
-        self._process_hedge(timestamp_ms, price)
+
+        # Hedge now requires ATR/EMA row → pass row dict
+        self._process_hedge(timestamp_ms, price, row)
 
     # ------------------------------------------------------------------
     # BUY logic
@@ -667,7 +585,10 @@ class BaseGridStrategy(ABC):
 
             if price <= level_price and not filled:
                 if self.available_capital < self.order_size_usdt:
-                    self.logger.log(f"Skip BUY grid@{level_price}: insufficient capital ({self.available_capital})", level="INFO")
+                    self.logger.log(
+                        f"Skip BUY grid@{level_price}: insufficient capital ({self.available_capital})",
+                        level="INFO",
+                    )
                     continue
 
                 qty = round(self.order_size_usdt / level_price, 6)
@@ -681,7 +602,7 @@ class BaseGridStrategy(ABC):
 
                 fee = 0.001
                 notional = level_price * qty
-                self.available_capital -= (notional + fee)
+                self.available_capital -= notional + fee
 
                 # --- คำนวณ target ตาม ATR-based spacing ---
                 # 1) ใช้ spacing ปัจจุบันที่มาจาก ATR * atr_multiplier
@@ -765,22 +686,17 @@ class BaseGridStrategy(ABC):
 
             if is_paper_mode:
                 # backtest/forward_test → สมมติ fill ทันที
-                self.available_capital += (notional - fee)
+                self.available_capital += notional - fee
                 self.realized_grid_profit += pnl
 
                 self.logger.log(
-                    f"[PAPER] Grid SELL: entry={pos.entry_price}, "
-                    f"target={pos.target_price}, sell={price}, "
-                    f"qty={pos.qty}, pnl={pnl}, "
-                    f"total_realized={self.realized_grid_profit}",
+                    f"[PAPER] Grid SELL: entry={pos.entry_price}, " f"target={pos.target_price}, sell={price}, " f"qty={pos.qty}, pnl={pnl}, " f"total_realized={self.realized_grid_profit}",
                     level="INFO",
                 )
             else:
                 # live → แค่บันทึกว่าได้สั่งขายแล้ว (ให้ไปดู fill จริงจาก exchange/DB)
                 self.logger.log(
-                    f"[LIVE] Grid SELL order placed: entry={pos.entry_price}, "
-                    f"target={pos.target_price}, sell={price}, "
-                    f"qty={pos.qty}, est_pnl≈{pnl}",
+                    f"[LIVE] Grid SELL order placed: entry={pos.entry_price}, " f"target={pos.target_price}, sell={price}, " f"qty={pos.qty}, est_pnl≈{pnl}",
                     level="INFO",
                 )
 
@@ -803,29 +719,6 @@ class BaseGridStrategy(ABC):
         # เก็บเฉพาะ positions ที่ยังไม่ถึงเป้าหมาย
         self.positions = remaining_positions
 
-    # ------------------------------------------------------------------
-    # Hedge logic (โครง)
-    # ------------------------------------------------------------------
-
-    def _process_hedge(self, timestamp_ms: int, price: float) -> None:
-        """
-        ใส่ rule สำหรับ hedge ที่ระดับต่ำกว่ากริดล่างสุด
-        ตรงนี้เป็นโครงไว้ให้ – detailed rule ค่อยเติม
-        """
-        if not self.grid_prices:
-            return
-
-        lowest = min(self.grid_prices)
-
-        # example condition: price ต่ำกว่า lowest grid - ATR(approx)
-        # ตอนนี้ยังไม่คำนวณ ATR ต่อบาร์ที่นี่ เพื่อความง่าย เอา logic เดิมมาใส่ทีหลังได้
-        if price < lowest:
-            # TODO: เติม rule เก่า เช่น เปิด hedge 50% ของ spot qty ที่ถืออยู่ เป็นต้น
-            pass
-
-        # TODO: logic ปิด hedge เช่น price กลับขึ้นเหนือ entry + ATR ก็ปิด ฯลฯ
-        # self._io_close_hedge(...)
-
     def _calc_unrealized_pnl(self, current_price: float) -> float:
         """
         รวม unrealized PnL ของ spot positions ทั้งหมด ณ ราคา current_price
@@ -845,12 +738,485 @@ class BaseGridStrategy(ABC):
             pos_value += p.qty * current_price
         return cash + pos_value
 
-    def _snapshot_account_balance(
-        self,
-        timestamp_ms: int,
-        current_price: float,
-        notes: str = "",
-    ) -> None:
+    # ==================================================================
+    #   HEDGE LOGIC (EMA + ZONE)
+    # ==================================================================
+    def _process_hedge(self, timestamp_ms: int, price: float, row: dict) -> None:
+        """
+        จัดการ hedge:
+        - เริ่ม hedge ตั้งแต่ราคาเข้า Danger Zone (ระหว่าง L2 กับ L1) ถ้า EMA ยืนยัน downtrend
+        - เพิ่ม hedge เมื่อหลุด lowest grid - k*ATR
+        - ปิด hedge ตาม PnL + EMA reversal
+        - ใช้กำไร hedge มาช่วยลด spot (รักษาเงินต้น)
+        """
+
+        # ถ้ายังไม่มีกลยุทธ์ grid / ไม่มี position spot → ไม่ hedge
+        if not self.grid_prices or not self.positions:
+            return
+
+        # ATR & EMA จาก row ล่าสุด
+        atr = float(row.get("atr_14", 0.0) or 0.0)
+        ema_fast = float(row.get(f"ema_{self.ema_fast_period}", 0.0) or 0.0)
+        ema_mid = float(row.get(f"ema_{self.ema_mid_period}", 0.0) or 0.0)
+        ema_slow = float(row.get(f"ema_{self.ema_slow_period}", 0.0) or 0.0)
+
+        if atr <= 0 or ema_fast == 0 or ema_mid == 0 or ema_slow == 0:
+            return
+
+        # net spot
+        net_spot_qty = sum(p.qty for p in self.positions)
+        if net_spot_qty <= 0:
+            return
+
+        avg_spot_cost = sum(p.entry_price * p.qty for p in self.positions) / net_spot_qty
+        spot_unrealized = (price - avg_spot_cost) * net_spot_qty  # มักเป็นลบถ้าติดดอย
+
+        grid_sorted = sorted(self.grid_prices)
+        lowest = grid_sorted[0]
+        second = grid_sorted[1] if len(grid_sorted) > 1 else lowest
+
+        danger_start = second  # L2
+        danger_end = lowest  # L1
+
+        in_danger_zone = danger_end <= price <= danger_start
+
+        # EMA filter
+        downtrend_light = price < ema_fast < ema_mid
+        downtrend_strong = price < ema_fast < ema_mid < ema_slow
+
+        # ----------------- 1) เปิด / เพิ่ม hedge ใน Danger Zone -----------------
+        if in_danger_zone and downtrend_light:
+            # พยายามให้ hedge คิดเป็น 30% ของ net spot
+            self._ensure_hedge_ratio(
+                target_ratio=0.3,
+                price=price,
+                net_spot_qty=net_spot_qty,
+                reason="DANGER_ZONE",
+            )
+
+        # ----------------- 2) เพิ่ม hedge เมื่อหลุด lowest grid - k*ATR -----------------
+        price_break = price < (lowest - self.hedge_open_k_atr * atr)
+
+        if price_break and downtrend_strong:
+            # scale hedge ให้ขึ้นไปถึง 60% ของ net spot
+            self._ensure_hedge_ratio(
+                target_ratio=self.hedge_size_ratio,  # ใช้ 0.5–0.6 ตาม config
+                price=price,
+                net_spot_qty=net_spot_qty,
+                reason="BREAK_LOWEST",
+            )
+
+        # ----------------- 3) จัดการปิด hedge (TP / SL / reversal) -----------------
+        self._manage_hedge_exit(timestamp_ms, price, spot_unrealized, ema_fast, ema_mid)
+
+    # ------------------------------------------------------------------
+    def _ensure_hedge_ratio(self, target_ratio: float, price: float, net_spot_qty: float, reason: str) -> None:
+        """
+        ทำให้ขนาด hedge ปัจจุบันเข้าใกล้ target_ratio ของ net_spot_qty
+        เช่น:
+            - มี hedge เดิม 20% แต่ target 30% → เปิดเพิ่มอีก 10%
+            - มี hedge อยู่แล้วเกิน target → ไม่ทำอะไร (ง่าย ๆ ก่อน)
+        """
+        current_qty = self.hedge_position["qty"] if self.hedge_position else 0.0
+        current_ratio = current_qty / net_spot_qty if net_spot_qty > 0 else 0.0
+
+        if current_ratio >= target_ratio - 1e-6:
+            # มี hedge พอแล้ว
+            return
+
+        add_ratio = target_ratio - current_ratio
+        add_qty = net_spot_qty * add_ratio
+        notional = add_qty * price / max(self.hedge_leverage, 1)
+
+        if notional < self.min_hedge_notional:
+            # notional เล็กเกินไป ไม่คุ้มเปิด
+            return
+
+        # I/O layer: ให้ subclass ไป implement จริง
+        hedge_entry_price = self._io_open_hedge_short(
+            qty=add_qty,
+            price=price,
+            reason=reason,
+        )
+        if hedge_entry_price is None:
+            # เปิด hedge ไม่สำเร็จ
+            return
+
+        if self.hedge_position is None:
+            self.hedge_position = {
+                "qty": add_qty,
+                "entry": hedge_entry_price,
+                "timestamp": int(time.time() * 1000),
+            }
+        else:
+            # ถ้าเดิมมี hedge อยู่ → เฉลี่ยต้นทุน
+            old = self.hedge_position
+            new_qty = old["qty"] + add_qty
+            new_entry = (old["entry"] * old["qty"] + hedge_entry_price * add_qty) / new_qty
+            self.hedge_position["qty"] = new_qty
+            self.hedge_position["entry"] = new_entry
+
+        self.logger.log(
+            f"[HEDGE] scale-in {reason}: add_qty={add_qty:.4f}, " f"target_ratio={target_ratio:.2f}, " f"new_qty={self.hedge_position['qty']:.4f}, " f"entry={self.hedge_position['entry']:.4f}",
+            level="INFO",
+        )
+
+    # ------------------------------------------------------------------
+    def _manage_hedge_exit(self, timestamp_ms: int, price: float, spot_unrealized: float, ema_fast: float, ema_mid: float) -> None:
+        """
+        ตัดสินใจปิด hedge:
+        - TP: กำไร hedge ชดเชย spot unrealized ได้ตาม hedge_tp_ratio
+        - SL: ถ้าราคาเด้งกลับ + hedge ขาดทุนเกิน hedge_sl_ratio
+        - ถ้า spot กลับมากำไร → ปิด hedge ทิ้ง
+        """
+        if self.hedge_position is None:
+            return
+
+        h = self.hedge_position
+        hedge_qty = h["qty"]
+        hedge_entry = h["entry"]
+
+        # short: กำไร = (entry - price) * qty
+        hedge_pnl = (hedge_entry - price) * hedge_qty
+
+        # ถ้า spot unrealized กลับมาบวก → ไม่จำเป็นต้อง hedge แล้ว
+        if spot_unrealized >= 0:
+            self._close_hedge(timestamp_ms, price, reason="spot_back_to_profit")
+            return
+
+        # TP case
+        tp_threshold = abs(spot_unrealized) * self.hedge_tp_ratio
+        if hedge_pnl >= tp_threshold > 0:
+            self._close_hedge(timestamp_ms, price, reason="TP")
+            # ใช้กำไร hedge มาลด spot ที่ขาดทุนหนัก ๆ
+            self._rebalance_spot_after_hedge(
+                timestamp_ms=timestamp_ms,
+                hedge_pnl=hedge_pnl,
+                price=price,
+            )
+            return
+
+        # SL case: ราคาเด้งกลับ + EMA fast > EMA mid (reversal)
+        reversal = price > ema_fast and ema_fast > ema_mid
+        sl_threshold = abs(spot_unrealized) * self.hedge_sl_ratio
+
+        if reversal and hedge_pnl <= -sl_threshold < 0:
+            self._close_hedge(timestamp_ms, price, reason="SL_reversal")
+            return
+
+    # ------------------------------------------------------------------
+    def _close_hedge(self, timestamp_ms: int, price: float, reason: str) -> None:
+        """
+        ปิด hedge ทั้งก้อน ผ่าน I/O layer แล้ว reset self.hedge_position
+        """
+        if self.hedge_position is None:
+            return
+
+        h = self.hedge_position
+        qty = h["qty"]
+        entry = h["entry"]
+        pnl = (entry - price) * qty  # short
+
+        self._io_close_hedge(
+            qty=qty,
+            price=price,
+            reason=reason,
+        )
+
+        self.logger.log(
+            f"[HEDGE] CLOSE reason={reason}, qty={qty:.4f}, entry={entry:.4f}, " f"close={price:.4f}, pnl={pnl:.4f}",
+            level="INFO",
+        )
+
+        self.hedge_position = None
+
+    # ------------------------------------------------------------------
+    def _rebalance_spot_after_hedge(self, timestamp_ms: int, hedge_pnl: float, price: float) -> None:
+        """
+        ใช้กำไร hedge_pnl เป็น buffer ในการขาย spot ที่ขาดทุนแพง ๆ
+        เป้าหมาย: ลด risk / ดึง equity กลับใกล้เงินต้น
+        แนวคิด:
+        - sort positions จาก entry สูง -> ต่ำ
+        - ขายทิ้งทีละ position โดยเอากำไร hedge มารับ loss
+        """
+        if hedge_pnl <= 0 or not self.positions:
+            return
+
+        positions_sorted = sorted(self.positions, key=lambda p: p.entry_price, reverse=True)
+        buffer = hedge_pnl
+        new_positions = []
+
+        for p in positions_sorted:
+            pos_unreal = (price - p.entry_price) * p.qty  # มักจะติดลบ
+            if pos_unreal >= 0:
+                # position ที่ไม่ขาดทุน → ยังเก็บไว้
+                new_positions.append(p)
+                continue
+
+            loss_if_sell = abs(pos_unreal)
+            if loss_if_sell > buffer:
+                # buffer ไม่พอรับ loss ของ position นี้ทั้งก้อน → เก็บไว้
+                new_positions.append(p)
+                continue
+
+            # ขาย position นี้ทิ้ง ใช้ buffer รับ loss
+            try:
+                self._io_place_spot_sell(
+                    timestamp_ms=timestamp_ms,
+                    position=p,
+                    sell_price=price,
+                )
+                buffer -= loss_if_sell
+                self.logger.log(
+                    f"[REBAL] cut spot entry={p['entry']:.4f}, qty={p['qty']:.4f}, " f"loss={pos_unreal:.4f}, buffer_left={buffer:.4f}",
+                    level="INFO",
+                )
+            except Exception as e:
+                self.logger.log(f"[REBAL] spot sell error: {e}", level="ERROR")
+                new_positions.append(p)
+
+        self.positions = new_positions
+
+    # ==================================================================
+    #   HEDGE LOGIC (EMA + ZONE)
+    # ==================================================================
+    def _process_hedge(self, timestamp_ms: int, price: float, row: dict) -> None:
+        """
+        จัดการ hedge:
+        - เริ่ม hedge ตั้งแต่ราคาเข้า Danger Zone (ระหว่าง L2 กับ L1) ถ้า EMA ยืนยัน downtrend
+        - เพิ่ม hedge เมื่อหลุด lowest grid - k*ATR
+        - ปิด hedge ตาม PnL + EMA reversal
+        - ใช้กำไร hedge มาช่วยลด spot (รักษาเงินต้น)
+        """
+
+        # ถ้ายังไม่มีกลยุทธ์ grid / ไม่มี position spot → ไม่ hedge
+        if not self.grid_prices or not self.positions:
+            return
+
+        # ATR & EMA จาก row ล่าสุด
+        atr = float(row.get("atr_14", 0.0) or 0.0)
+        ema_fast = float(row.get(f"ema_{self.ema_fast_period}", 0.0) or 0.0)
+        ema_mid = float(row.get(f"ema_{self.ema_mid_period}", 0.0) or 0.0)
+        ema_slow = float(row.get(f"ema_{self.ema_slow_period}", 0.0) or 0.0)
+
+        if atr <= 0 or ema_fast == 0 or ema_mid == 0 or ema_slow == 0:
+            return
+
+        # net spot
+        net_spot_qty = sum(p.qty for p in self.positions)
+        if net_spot_qty <= 0:
+            return
+
+        avg_spot_cost = sum(p.entry_price * p.qty for p in self.positions) / net_spot_qty
+        spot_unrealized = (price - avg_spot_cost) * net_spot_qty  # มักเป็นลบถ้าติดดอย
+
+        grid_sorted = sorted(self.grid_prices)
+        lowest = grid_sorted[0]
+        second = grid_sorted[1] if len(grid_sorted) > 1 else lowest
+
+        danger_start = second  # L2
+        danger_end = lowest  # L1
+
+        in_danger_zone = danger_end <= price <= danger_start
+
+        # EMA filter
+        downtrend_light = price < ema_fast < ema_mid
+        downtrend_strong = price < ema_fast < ema_mid < ema_slow
+
+        # ----------------- 1) เปิด / เพิ่ม hedge ใน Danger Zone -----------------
+        if in_danger_zone and downtrend_light:
+            # พยายามให้ hedge คิดเป็น 30% ของ net spot
+            self._ensure_hedge_ratio(
+                target_ratio=0.3,
+                price=price,
+                net_spot_qty=net_spot_qty,
+                reason="DANGER_ZONE",
+            )
+
+        # ----------------- 2) เพิ่ม hedge เมื่อหลุด lowest grid - k*ATR -----------------
+        price_break = price < (lowest - self.hedge_open_k_atr * atr)
+
+        if price_break and downtrend_strong:
+            # scale hedge ให้ขึ้นไปถึง 60% ของ net spot
+            self._ensure_hedge_ratio(
+                target_ratio=self.hedge_size_ratio,  # ใช้ 0.5–0.6 ตาม config
+                price=price,
+                net_spot_qty=net_spot_qty,
+                reason="BREAK_LOWEST",
+            )
+
+        # ----------------- 3) จัดการปิด hedge (TP / SL / reversal) -----------------
+        self._manage_hedge_exit(timestamp_ms, price, spot_unrealized, ema_fast, ema_mid)
+
+    # ------------------------------------------------------------------
+    def _ensure_hedge_ratio(self, target_ratio: float, price: float, net_spot_qty: float, reason: str) -> None:
+        """
+        ทำให้ขนาด hedge ปัจจุบันเข้าใกล้ target_ratio ของ net_spot_qty
+        เช่น:
+            - มี hedge เดิม 20% แต่ target 30% → เปิดเพิ่มอีก 10%
+            - มี hedge อยู่แล้วเกิน target → ไม่ทำอะไร (ง่าย ๆ ก่อน)
+        """
+        current_qty = self.hedge_position["qty"] if self.hedge_position else 0.0
+        current_ratio = current_qty / net_spot_qty if net_spot_qty > 0 else 0.0
+
+        if current_ratio >= target_ratio - 1e-6:
+            # มี hedge พอแล้ว
+            return
+
+        add_ratio = target_ratio - current_ratio
+        add_qty = net_spot_qty * add_ratio
+        notional = add_qty * price / max(self.hedge_leverage, 1)
+
+        if notional < self.min_hedge_notional:
+            # notional เล็กเกินไป ไม่คุ้มเปิด
+            return
+
+        # I/O layer: ให้ subclass ไป implement จริง
+        hedge_entry_price = self._io_open_hedge_short(
+            qty=add_qty,
+            price=price,
+            reason=reason,
+        )
+        if hedge_entry_price is None:
+            # เปิด hedge ไม่สำเร็จ
+            return
+
+        if self.hedge_position is None:
+            self.hedge_position = {
+                "qty": add_qty,
+                "entry": hedge_entry_price,
+                "timestamp": int(datetime.now().timestamp() * 1000),
+            }
+        else:
+            # ถ้าเดิมมี hedge อยู่ → เฉลี่ยต้นทุน
+            old = self.hedge_position
+            new_qty = old["qty"] + add_qty
+            new_entry = (old["entry"] * old["qty"] + hedge_entry_price * add_qty) / new_qty
+            self.hedge_position["qty"] = new_qty
+            self.hedge_position["entry"] = new_entry
+
+        self.logger.log(
+            f"[HEDGE] scale-in {reason}: add_qty={add_qty:.4f}, " f"target_ratio={target_ratio:.2f}, " f"new_qty={self.hedge_position['qty']:.4f}, " f"entry={self.hedge_position['entry']:.4f}",
+            level="INFO",
+        )
+
+    # ------------------------------------------------------------------
+    def _manage_hedge_exit(self, timestamp_ms: int, price: float, spot_unrealized: float, ema_fast: float, ema_mid: float) -> None:
+        """
+        ตัดสินใจปิด hedge:
+        - TP: กำไร hedge ชดเชย spot unrealized ได้ตาม hedge_tp_ratio
+        - SL: ถ้าราคาเด้งกลับ + hedge ขาดทุนเกิน hedge_sl_ratio
+        - ถ้า spot กลับมากำไร → ปิด hedge ทิ้ง
+        """
+        if self.hedge_position is None:
+            return
+
+        h = self.hedge_position
+        hedge_qty = h["qty"]
+        hedge_entry = h["entry"]
+
+        # short: กำไร = (entry - price) * qty
+        hedge_pnl = (hedge_entry - price) * hedge_qty
+
+        # ถ้า spot unrealized กลับมาบวก → ไม่จำเป็นต้อง hedge แล้ว
+        if spot_unrealized >= 0:
+            self._close_hedge(timestamp_ms, price, reason="spot_back_to_profit")
+            return
+
+        # TP case
+        tp_threshold = abs(spot_unrealized) * self.hedge_tp_ratio
+        if hedge_pnl >= tp_threshold > 0:
+            self._close_hedge(timestamp_ms, price, reason="TP")
+            # ใช้กำไร hedge มาลด spot ที่ขาดทุนหนัก ๆ
+            self._rebalance_spot_after_hedge(
+                timestamp_ms=timestamp_ms,
+                hedge_pnl=hedge_pnl,
+                price=price,
+            )
+            return
+
+        # SL case: ราคาเด้งกลับ + EMA fast > EMA mid (reversal)
+        reversal = price > ema_fast and ema_fast > ema_mid
+        sl_threshold = abs(spot_unrealized) * self.hedge_sl_ratio
+
+        if reversal and hedge_pnl <= -sl_threshold < 0:
+            self._close_hedge(timestamp_ms, price, reason="SL_reversal")
+            return
+
+    # ------------------------------------------------------------------
+    def _close_hedge(self, timestamp_ms: int, price: float, reason: str) -> None:
+        """
+        ปิด hedge ทั้งก้อน ผ่าน I/O layer แล้ว reset self.hedge_position
+        """
+        if self.hedge_position is None:
+            return
+
+        h = self.hedge_position
+        qty = h["qty"]
+        entry = h["entry"]
+        pnl = (entry - price) * qty  # short
+
+        self._io_close_hedge(
+            qty=qty,
+            price=price,
+            reason=reason,
+        )
+
+        self.logger.log(
+            f"[HEDGE] CLOSE reason={reason}, qty={qty:.4f}, entry={entry:.4f}, " f"close={price:.4f}, pnl={pnl:.4f}",
+            level="INFO",
+        )
+
+        self.hedge_position = None
+
+    # ------------------------------------------------------------------
+    def _rebalance_spot_after_hedge(self, timestamp_ms: int, hedge_pnl: float, price: float) -> None:
+        """
+        ใช้กำไร hedge_pnl เป็น buffer ในการขาย spot ที่ขาดทุนแพง ๆ
+        เป้าหมาย: ลด risk / ดึง equity กลับใกล้เงินต้น
+        แนวคิด:
+        - sort positions จาก entry สูง -> ต่ำ
+        - ขายทิ้งทีละ position โดยเอากำไร hedge มารับ loss
+        """
+        if hedge_pnl <= 0 or not self.positions:
+            return
+
+        positions_sorted = sorted(self.positions, key=lambda p: p["entry"], reverse=True)
+        buffer = hedge_pnl
+        new_positions = []
+
+        for p in positions_sorted:
+            pos_unreal = (price - p["entry"]) * p["qty"]  # มักจะติดลบ
+            if pos_unreal >= 0:
+                # position ที่ไม่ขาดทุน → ยังเก็บไว้
+                new_positions.append(p)
+                continue
+
+            loss_if_sell = abs(pos_unreal)
+            if loss_if_sell > buffer:
+                # buffer ไม่พอรับ loss ของ position นี้ทั้งก้อน → เก็บไว้
+                new_positions.append(p)
+                continue
+
+            # ขาย position นี้ทิ้ง ใช้ buffer รับ loss
+            try:
+                self._io_place_spot_sell(
+                    timestamp_ms=timestamp_ms,
+                    position=p,
+                    sell_price=price,
+                )
+                buffer -= loss_if_sell
+                self.logger.log(
+                    f"[REBAL] cut spot entry={p['entry']:.4f}, qty={p['qty']:.4f}, " f"loss={pos_unreal:.4f}, buffer_left={buffer:.4f}",
+                    level="INFO",
+                )
+            except Exception as e:
+                self.logger.log(f"[REBAL] spot sell error: {e}", level="ERROR")
+                new_positions.append(p)
+
+        self.positions = new_positions
+
+    def _snapshot_account_balance(self, timestamp_ms: int, current_price: float, notes: str = "") -> None:
         """
         สร้าง snapshot ลง table account_balance
         - ใช้เฉพาะ backtest/forward_test (กันไม่ให้ spam ตอน live)
@@ -865,8 +1231,8 @@ class BaseGridStrategy(ABC):
         record_date = dt.strftime("%Y-%m-%d")
         record_time = dt.strftime("%H:%M:%S")
 
-        equity       = self._calc_equity(current_price)
-        unrealized   = self._calc_unrealized_pnl(current_price)
+        equity = self._calc_equity(current_price)
+        unrealized = self._calc_unrealized_pnl(current_price)
         realized_pnl = float(self.realized_grid_profit)
         # backtest: net_flow_usdt = 0 (ไม่มีฝากถอน), fees_usdt = 0 (ถ้ายังไม่ได้คิด fee)
         data = {
