@@ -10,36 +10,38 @@ class GridState(BaseMySQLRepo):
         conn = self._get_conn()
         cursor = conn.cursor()
         # Create table without 'filled' column
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS `grid_state` (
-                `id` INT AUTO_INCREMENT PRIMARY KEY,
-                `symbol` varchar(255) NOT NULL,
-                `grid_price` decimal(18, 8) NOT NULL,
-                `use_status` varchar(1) NOT NULL DEFAULT 'N',
-                `group_id` varchar(64) NOT NULL,
-                `date` date DEFAULT(curdate()),
-                `time` time DEFAULT NULL,
-                `base_price` decimal(18, 8) NOT NULL DEFAULT '0.00000000',
-                `spacing` decimal(18, 8) NOT NULL DEFAULT '0.00000000',
-                `create_date` datetime DEFAULT CURRENT_TIMESTAMP,
-                `update_date` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP            
+        try:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS `grid_state` (
+                    `id` INT AUTO_INCREMENT PRIMARY KEY,
+                    `symbol` varchar(255) NOT NULL,
+                    `grid_price` decimal(18, 8) NOT NULL,
+                    `use_status` varchar(1) NOT NULL DEFAULT 'N',
+                    `group_id` varchar(64) NOT NULL,
+                    `date` date DEFAULT(curdate()),
+                    `time` time DEFAULT NULL,
+                    `base_price` decimal(18, 8) NOT NULL DEFAULT '0.00000000',
+                    `spacing` decimal(18, 8) NOT NULL DEFAULT '0.00000000',
+                    `create_date` datetime DEFAULT CURRENT_TIMESTAMP,
+                    `update_date` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP            
+                )
+                """
             )
-            """
-        )
 
-        cursor.execute("""
-            SELECT COUNT(1) FROM INFORMATION_SCHEMA.STATISTICS
-            WHERE TABLE_SCHEMA = DATABASE()
-            AND TABLE_NAME = 'grid_state'
-            AND INDEX_NAME = 'ux_grid_group_price';
-        """)
-        
-        if cursor.fetchone()[0] == 0:
-            cursor.execute("CREATE INDEX ux_grid_group_price ON grid_state(group_id, grid_price)")
+            cursor.execute("""
+                SELECT COUNT(1) FROM INFORMATION_SCHEMA.STATISTICS
+                WHERE TABLE_SCHEMA = DATABASE()
+                AND TABLE_NAME = 'grid_state'
+                AND INDEX_NAME = 'ux_grid_group_price';
+            """)
+            
+            if cursor.fetchone()[0] == 0:
+                cursor.execute("CREATE INDEX ux_grid_group_price ON grid_state(group_id, grid_price)")
 
-        conn.commit()
-        conn.close()
+        finally:
+            conn.commit()
+            conn.close()
 
     def load_state_with_use_flgs(self, symbol,  use_flgs: str = "Y") -> List[Dict[str, Any]]:
         conn = self._get_conn()
@@ -63,86 +65,109 @@ class GridState(BaseMySQLRepo):
         """
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute(
-            """
-                INSERT INTO grid_state (
-                    symbol,
-                    grid_price,
-                    use_status,
-                    group_id,
-                    base_price,
-                    spacing,
-                    date,
-                    time,
-                    create_date
-                ) VALUES ( %(symbol)s, %(grid_price)s, %(use_status)s, %(group_id)s, %(base_price)s, %(spacing)s, %(date)s, %(time)s, %(create_date)s )
-                ON DUPLICATE KEY UPDATE
-                    symbol       = VALUES(symbol),
-                    use_status   = VALUES(use_status),
-                    base_price   = VALUES(base_price),
-                    spacing      = VALUES(spacing),
-                    date         = VALUES(date),
-                    time         = VALUES(time),
-                    group_id     = VALUES(group_id),
-                    create_date  = VALUES(create_date);
-            """,
-            entry
-        )
 
-        id = cursor.lastrowid
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return id
+        try:
+            cursor.execute(
+                """
+                    INSERT INTO grid_state (
+                        symbol,
+                        grid_price,
+                        use_status,
+                        group_id,
+                        base_price,
+                        spacing,
+                        date,
+                        time,
+                        create_date
+                    ) VALUES ( %(symbol)s, %(grid_price)s, %(use_status)s, %(group_id)s, %(base_price)s, %(spacing)s, %(date)s, %(time)s, %(create_date)s )
+                    ON DUPLICATE KEY UPDATE
+                        symbol       = VALUES(symbol),
+                        use_status   = VALUES(use_status),
+                        base_price   = VALUES(base_price),
+                        spacing      = VALUES(spacing),
+                        date         = VALUES(date),
+                        time         = VALUES(time),
+                        group_id     = VALUES(group_id),
+                        create_date  = VALUES(create_date);
+                """,
+                entry
+            )
+
+            id = cursor.lastrowid
+            conn.commit()
+            return id
+        finally:
+            cursor.close()
+            conn.close()
+        
 
     def mark_filled(self, price: float) -> int:
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            UPDATE grid_state
-               SET status      = 'close',
-                   update_date = CURRENT_TIMESTAMP
-             WHERE grid_price = ?
-            """, (price)
-        )
-        conn.commit()
-        conn.close()
-        return cursor.rowid
+        try:
+            cursor.execute(
+                """
+                UPDATE grid_state
+                   SET status      = 'close',
+                       update_date = CURRENT_TIMESTAMP
+                 WHERE grid_price = %s
+                """,
+                (price,),
+            )
+            conn.commit()
+            return cursor.rowcount
+        finally:
+            cursor.close()
+            conn.close()
+
+        
 
     def mark_open(self, price: float) -> int:
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            UPDATE grid_state
-               SET status      = 'open',
-                   update_date = CURRENT_TIMESTAMP
-             WHERE grid_price = ?
-            """, (price)
-        )
-        conn.commit()
-        conn.close()
-        return cursor.rowid
+        try:
+            cursor.execute(
+                """
+                UPDATE grid_state
+                   SET status      = 'open',
+                       update_date = CURRENT_TIMESTAMP
+                 WHERE grid_price = %s
+                """,
+                (price,),
+            )
+            conn.commit()
+            return cursor.rowcount
+        finally:
+            cursor.close()
+            conn.close()
+
 
     def cancel_all_open(self) -> int:
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            UPDATE grid_state
-               SET status      = 'cancelled',
-                   update_date = CURRENT_TIMESTAMP
-             WHERE status = 'open'
-            """
-        )
-        conn.commit()
-        conn.close()
+        try:
+            cursor.execute(
+                """
+                UPDATE grid_state
+                   SET status      = 'cancelled',
+                       update_date = CURRENT_TIMESTAMP
+                 WHERE status = 'open'
+                """
+            )
+            conn.commit()
+            return cursor.rowcount
+        finally:
+            cursor.close()
+            conn.close()
+
 
     def delete_all_states(self) -> int:
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM grid_state")
-        conn.commit()
-        conn.close()
-        return cursor.rowcount
+        try:
+            cursor.execute("DELETE FROM grid_state")
+            conn.commit()
+            return cursor.rowcount
+        finally:
+            cursor.close()
+            conn.close()

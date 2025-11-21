@@ -9,61 +9,63 @@ class SpotOrders(BaseMySQLRepo):
     """
 
     def __init__(self) -> None:
-        conn = self._get_conn()
-        cursor = conn.cursor()
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor()
 
-        # Create spot_orders table if not exists
-        cursor.execute(
+            # Create spot_orders table if not exists
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS spot_orders (
+                    id      BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    -- key ของ bot เอง
+                    grid_id VARCHAR(64) NOT NULL,
+
+                    -- จาก Binance /api/v3/order (FULL / RESULT response)
+                    symbol    VARCHAR(32)  NOT NULL,              -- เช่น BTCUSDT
+                    order_id  VARCHAR(255) NOT NULL,              -- orderId (long) ตาม spec
+                    order_list_id BIGINT   NOT NULL DEFAULT -1,   -- -1 ถ้าไม่ใช่ OCO
+                    client_order_id VARCHAR(64) NOT NULL,         -- clientOrderId (Binance จะใส่ให้ถ้าเราไม่ส่ง)
+
+                    price                 DECIMAL(18, 8) NOT NULL DEFAULT '0.00000000',
+                    orig_qty              DECIMAL(18, 8) NOT NULL DEFAULT '0.00000000',
+                    executed_qty          DECIMAL(18, 8) NOT NULL DEFAULT '0.00000000',
+                    cummulative_quote_qty DECIMAL(18, 8) NOT NULL DEFAULT '0.00000000',
+
+                    status        VARCHAR(32) NOT NULL,   -- NEW, PARTIALLY_FILLED, FILLED, CANCELED ...
+                    time_in_force VARCHAR(16) NOT NULL,   -- GTC, IOC, FOK
+                    type          VARCHAR(32) NOT NULL,   -- LIMIT, MARKET, STOP_LOSS_LIMIT ...
+                    side          VARCHAR(8)  NOT NULL,   -- BUY / SELL
+
+                    stop_price    DECIMAL(18, 8) NOT NULL DEFAULT '0.00000000',
+                    iceberg_qty   DECIMAL(18, 8) NOT NULL DEFAULT '0.00000000',
+
+                    -- timestamp จาก Binance (ms)
+                    binance_time        BIGINT NOT NULL,     -- time
+                    binance_update_time BIGINT NOT NULL,     -- updateTime
+                    working_time        BIGINT NULL,         -- workingTime (บางเคสอาจไม่มี/เปลี่ยน spec เลยเผื่อ NULL)
+
+                    is_working TINYINT(1) NOT NULL,          -- isWorking: true/false -> 1/0
+
+                    orig_quote_order_qty        DECIMAL(18, 8) NOT NULL DEFAULT '0.00000000',
+                    self_trade_prevention_mode  VARCHAR(32) NULL,  -- EXPIRE_MAKER, NONE ... เผื่ออนาคต
+
+                    -- timestamp ของ DB เอง
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+                    INDEX idx_spot_orders_symbol (symbol),
+                    INDEX idx_spot_orders_grid_id (grid_id),
+                    INDEX idx_spot_orders_order_id (order_id),
+                    INDEX idx_spot_orders_created_at (created_at)
+                )
             """
-            CREATE TABLE IF NOT EXISTS spot_orders (
-                id      BIGINT AUTO_INCREMENT PRIMARY KEY,
-                -- key ของ bot เอง
-                grid_id VARCHAR(64) NOT NULL,
-
-                -- จาก Binance /api/v3/order (FULL / RESULT response)
-                symbol    VARCHAR(32)  NOT NULL,              -- เช่น BTCUSDT
-                order_id  VARCHAR(255) NOT NULL,              -- orderId (long) ตาม spec
-                order_list_id BIGINT   NOT NULL DEFAULT -1,   -- -1 ถ้าไม่ใช่ OCO
-                client_order_id VARCHAR(64) NOT NULL,         -- clientOrderId (Binance จะใส่ให้ถ้าเราไม่ส่ง)
-
-                price                 DECIMAL(18, 8) NOT NULL DEFAULT '0.00000000',
-                orig_qty              DECIMAL(18, 8) NOT NULL DEFAULT '0.00000000',
-                executed_qty          DECIMAL(18, 8) NOT NULL DEFAULT '0.00000000',
-                cummulative_quote_qty DECIMAL(18, 8) NOT NULL DEFAULT '0.00000000',
-
-                status        VARCHAR(32) NOT NULL,   -- NEW, PARTIALLY_FILLED, FILLED, CANCELED ...
-                time_in_force VARCHAR(16) NOT NULL,   -- GTC, IOC, FOK
-                type          VARCHAR(32) NOT NULL,   -- LIMIT, MARKET, STOP_LOSS_LIMIT ...
-                side          VARCHAR(8)  NOT NULL,   -- BUY / SELL
-
-                stop_price    DECIMAL(18, 8) NOT NULL DEFAULT '0.00000000',
-                iceberg_qty   DECIMAL(18, 8) NOT NULL DEFAULT '0.00000000',
-
-                -- timestamp จาก Binance (ms)
-                binance_time        BIGINT NOT NULL,     -- time
-                binance_update_time BIGINT NOT NULL,     -- updateTime
-                working_time        BIGINT NULL,         -- workingTime (บางเคสอาจไม่มี/เปลี่ยน spec เลยเผื่อ NULL)
-
-                is_working TINYINT(1) NOT NULL,          -- isWorking: true/false -> 1/0
-
-                orig_quote_order_qty        DECIMAL(18, 8) NOT NULL DEFAULT '0.00000000',
-                self_trade_prevention_mode  VARCHAR(32) NULL,  -- EXPIRE_MAKER, NONE ... เผื่ออนาคต
-
-                -- timestamp ของ DB เอง
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-
-                INDEX idx_spot_orders_symbol (symbol),
-                INDEX idx_spot_orders_grid_id (grid_id),
-                INDEX idx_spot_orders_order_id (order_id),
-                INDEX idx_spot_orders_created_at (created_at)
             )
-        """
-        )
 
-        conn.commit()
-        cursor.close()
-        conn.close()
+            conn.commit()
+        finally:
+            cursor.close()
+            conn.close()
 
     def create_order(self, data: Dict[str, Any]) -> int:
         """
@@ -113,60 +115,64 @@ class SpotOrders(BaseMySQLRepo):
 
     def get_order(self, order_id: str) -> Optional[Dict[str, Any]]:
         """Fetch a single spot order by Binance order_id."""
+
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM spot_orders WHERE order_id = %s", (order_id,)
-        )
-        row = cursor.fetchone()
-        if not row:
+        try:
+            cursor.execute(
+                "SELECT * FROM spot_orders WHERE order_id = %s", (order_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            columns = [col[0] for col in cursor.description]
+        
+            return dict(zip(columns, row))
+        finally:
             cursor.close()
             conn.close()
-            return None
 
-        columns = [col[0] for col in cursor.description]
-        cursor.close()
-        conn.close()
-        return dict(zip(columns, row))
-
-    def get_order_by_grid_id_and_price(
-        self, grid_id: str, price: Any
-    ) -> Optional[Dict[str, Any]]:
+    def get_order_by_grid_id_and_price(self, grid_id: str, price: Any) -> Optional[Dict[str, Any]]:
         """Fetch a single spot order by Binance grid_id and price."""
+
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT * FROM spot_orders WHERE grid_id = %s AND price = %s",
-            (grid_id, price),
-        )
-        row = cursor.fetchone()
-        if not row:
+        try:
+            cursor.execute(
+                "SELECT * FROM spot_orders WHERE grid_id = %s AND price = %s", (grid_id, price),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            columns = [col[0] for col in cursor.description]
+            
+            return dict(zip(columns, row))
+        finally:
             cursor.close()
             conn.close()
-            return None
-
-        columns = [col[0] for col in cursor.description]
-        cursor.close()
-        conn.close()
-        return dict(zip(columns, row))
 
     def list_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         """List all spot orders, optionally filtered by symbol."""
+        
         conn = self._get_conn()
         cursor = conn.cursor()
-        if symbol:
-            cursor.execute(
-                "SELECT * FROM spot_orders WHERE symbol = %s ORDER BY time",
-                (symbol,),
-            )
-        else:
-            cursor.execute("SELECT * FROM spot_orders ORDER BY time")
+        try: 
+            if symbol:
+                cursor.execute(
+                    "SELECT * FROM spot_orders WHERE symbol = %s ORDER BY time",
+                    (symbol,),
+                )
+            else:
+                cursor.execute("SELECT * FROM spot_orders ORDER BY time")
 
-        rows = cursor.fetchall()
-        columns = [col[0] for col in cursor.description]
-        cursor.close()
-        conn.close()
-        return [dict(zip(columns, row)) for row in rows]
+            rows = cursor.fetchall()
+            columns = [col[0] for col in cursor.description]
+            return [dict(zip(columns, row)) for row in rows]
+        finally:
+            cursor.close()
+            conn.close()
 
     def update_order(self, order_id: str, updates: Dict[str, Any]) -> None:
         """Update fields of a spot order by Binance order_id."""

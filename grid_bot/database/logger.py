@@ -15,18 +15,20 @@ class Logger(BaseMySQLRepo):
     def _ensure_table(self):
         conn = self._get_conn()  # ✅ use _get_conn(), not super()._get_conn()
         cursor = conn.cursor()
-        cursor.execute(
-            '''
-            CREATE TABLE IF NOT EXISTS logs (
-                timestamp TEXT,
-                level TEXT,
-                message TEXT
+        try:
+            cursor.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS logs (
+                    timestamp TEXT,
+                    level TEXT,
+                    message TEXT
+                )
+                '''
             )
-            '''
-        )
-        conn.commit()
-        cursor.close()
-        conn.close()
+            conn.commit()
+        finally:
+            cursor.close()
+            conn.close()
 
        
 
@@ -37,9 +39,11 @@ class Logger(BaseMySQLRepo):
         else:
             conn = self._get_conn()
             cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO logs (timestamp, level, message) VALUES (%s, %s, %s)", (ts, level, message)
-            )
-            conn.commit()
-            cursor.close()
-            conn.close()
+            try:
+                cursor.execute(
+                    "INSERT INTO logs (timestamp, level, message) VALUES (%s, %s, %s)", (ts, level, message)
+                )
+                conn.commit()
+            finally:
+                cursor.close()
+                conn.close()

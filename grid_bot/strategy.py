@@ -165,49 +165,74 @@ class Strategy:
                 float(row['Close']),
                 float(row['Volume']),
             )
-            result = self._process_tick(self.symbol, processed_row)
+            result = self._process_tick(processed_row)
         return result  
+
+    from datetime import datetime
 
     def initialize_grid(self, symbol: str, base_price: float, spacing: float, levels: int = 10) -> Tuple[str, List[float]]:
         
+        # โหลด state เดิมจาก DB (ถ้ามี)
         rows = self.grid_db.load_state_with_use_flgs(symbol, "Y")
-        if rows and len(rows) >= levels * 2:
-            self.grid_prices   = [float(r["grid_price"]) for r in rows]
-            self.grid_group_id = rows[0]["group_id"]
-            self.grid_filled = {
-                float(r["grid_price"]): (r.get("status") == "open")  # ถ้า DB มี status ก็ใช้, ถ้าไม่มีจะเป็น False
-                for r in rows
-            }
-            self.logger.log(
-                f"Existing grid state found with group_id: {self.grid_group_id}, prices: {self.grid_prices}",
-                level="INFO"
-            )
-        else:
-            self.logger.log("No existing grid state found, initializing new grid", level="INFO")
-            lower = [float(round(base_price - spacing * i, 2)) for i in range(1, levels+1)]
-            upper = [float(round(base_price + spacing * i, 2)) for i in range(1, levels+1)]
-            self.grid_prices   = upper + lower
-            self.grid_group_id = util.generate_order_id("INIT")
-            self.logger.log(
-                f"Grid initialized with base price={base_price}, group_id={self.grid_group_id}, prices={self.grid_prices}",
-                level="INFO"
-            )
-            self.grid_filled = {price: False for price in self.grid_prices}
-            for price in self.grid_prices:
-                items = {
-                    'symbol': symbol,
-                    'grid_price': price,
-                    'use_status': 'Y',
-                    'group_id': self.grid_group_id,
-                    'base_price': float(base_price),
-                    'spacing': float(spacing),
-                    'date' : datetime.now().strftime('%Y-%m-%d'),
-                    'time' : datetime.now().strftime('%H:%M:%S'),
-                    'create_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        # ----- กรณีมี state เดิม: ใช้เฉพาะ grid ด้านล่าง (price < base_price) -----
+        if rows:
+            lower_rows = [
+                r for r in rows
+                if float(r["grid_price"]) < float(base_price)
+            ]
+            if len(lower_rows) >= levels:
+                self.grid_prices   = sorted(float(r["grid_price"]) for r in lower_rows)
+                self.grid_group_id = lower_rows[0]["group_id"]
+                self.grid_filled = {
+                    float(r["grid_price"]): (str(r.get("status", "open")).lower() == "open")
+                    for r in lower_rows
                 }
-                self.grid_db.save_state(items)
+                self.logger.log(
+                    f"Existing LOWER grid state found with group_id: {self.grid_group_id}, prices: {self.grid_prices}",
+                    level="INFO"
+                )
+                return (self.grid_group_id, self.grid_prices)
+
+        # ----- ไม่มี state เดิมที่ใช้ได้ → สร้าง grid ใหม่ (ฝั่งล่างอย่างเดียว) -----
+        self.logger.log("No existing grid state found, initializing new LOWER-only grid", level="INFO")
+
+        # สร้าง grid ด้านล่าง: base_price - n*spacing
+        lower = [float(round(base_price - spacing * i, 2)) for i in range(1, levels + 1)]
+        self.grid_prices   = lower
+        self.grid_group_id = util.generate_order_id("INIT")
+
+        self.logger.log(
+            f"Grid initialized (LOWER only) with base price={base_price}, "
+            f"group_id={self.grid_group_id}, prices={self.grid_prices}",
+            level="INFO"
+        )
+
+        # mark filled = False ทุกระดับ (ยังไม่มี position)
+        self.grid_filled = {price: False for price in self.grid_prices}
+
+        # เขียนลง DB เฉพาะ lower grid
+        now_date = datetime.now().strftime('%Y-%m-%d')
+        now_time = datetime.now().strftime('%H:%M:%S')
+        now_dt   = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        for price in self.grid_prices:
+            item = {
+                'symbol': symbol,
+                'grid_price': price,
+                'use_status': 'Y',
+                'group_id': self.grid_group_id,
+                'base_price': float(base_price),
+                'spacing': float(spacing),
+                'date': now_date,
+                'time': now_time,
+                'create_date': now_dt,
+                'status': 'open',
+            }
+            self.grid_db.save_state(item)
 
         return (self.grid_group_id, self.grid_prices)
+
     
     def define_spacing_size(self, atr_period: int, history: pd.DataFrame) -> float:
         df = history.copy().reset_index(drop=True)
@@ -228,23 +253,32 @@ class Strategy:
         last = df.iloc[-1]
         spacing = last['TR'] * (2.0 if last['TR'] > last['ATR'] else 1.0)
         return spacing
-        
-    def place_initial_orders(self, order_size_usdt : float, grid_prices : list[float], grid_id : str, center_price : float):
+    
+    def place_initial_orders(self, order_size_usdt: float, grid_prices: list[float], grid_id: str, center_price: float):
+        """
+        วางคำสั่งเริ่มต้นสำหรับ grid ทั้งหมด
+        Option 1: BUY-only grid
+        - ใช้ grid_prices ทั้งหมดเป็นฝั่ง BUY
+        - ไม่มีการวาง SELL ฝั่งบนตั้งแต่แรก
+        """
         resp = {}
         exchange = self.mode if self.mode == "live" else False
-        for price in grid_prices:
-            qty = round(order_size_usdt / float(price), 6)
-            if price < center_price:
-                resp = self.exchange_sync.place_limit_buy(self.symbol, price, qty, exchange)
-                self.logger.log(f"Placed live limit buy for {qty}@{price}", level="INFO")
-            else:
-                resp = self.exchange_sync.place_limit_sell(self.symbol, price, qty, exchange)
-                self.logger.log(f"Placed live limit sell for {qty}@{price}", level="INFO")
 
+        for price in grid_prices:
+            qty  = round(order_size_usdt / float(price), 6)
+
+            # BUY-only
+            resp = self.exchange_sync.place_limit_buy(self.symbol, price, qty, exchange)
+            self.logger.log(f"Placed limit buy for {qty}@{price}", level="INFO")
+
+            # sync เข้า DB ถ้ายังไม่มี record
             order = self.spot_orders_db.get_order_by_grid_id_and_price(grid_id, price)
             if order is None:
-                self.spot_orders_db.create_order(self.exchange_sync._build_spot_order_data(resp, grid_id))
+                order_data = self.exchange_sync._build_spot_order_data(resp, grid_id)
+                self.spot_orders_db.create_order(order_data)
+
         return resp
+
 
     def on_candle(self, symbol: str ,timestamp: int, open: float, high: float, low: float, close: float, volume: float) -> pd.Series:
 
@@ -333,7 +367,7 @@ class Strategy:
         self.prev_close = close
         return tr
 
-    def _process_tick(self, symbol, row: pd.Series) -> None:
+    def _process_tick(self, row: pd.Series) -> None:
         price    = row['close']
         atr      = row['atr']
         atr_avg  = row['atr_mean']
@@ -344,10 +378,7 @@ class Strategy:
             try:
                 self.sync_spot_orders_from_exchange()
             except Exception as e:
-                self.logger.log(
-                    f"sync_spot_orders_from_exchange in _process_tick error: {e}",
-                    level="ERROR",
-                )
+                self.logger.log(f"sync_spot_orders_from_exchange in _process_tick error: {e}", level="ERROR")
 
         # BUY: ถ้าราคาลงมาแตะ grid ที่ยังไม่มี position
         for gp in self.grid_prices:
@@ -380,7 +411,7 @@ class Strategy:
             target  = pos["target"]
             spacing = pos["spacing"]
 
-            # ยังไม่ถึง target → เก็บ position ต่อ
+            # if reached the target price, open the position.
             if price < target:
                 remaining_positions.append(pos)
                 continue
@@ -392,10 +423,7 @@ class Strategy:
                     # ใช้ (grid_id, price) เป็น key; SELL จะถูกบันทึกด้วย side = 'SELL'
                     existing_sell = self.spot_orders_db.get_order_by_grid_id_and_price(grid_id, price)
                 except Exception as e:
-                    self.logger.log(
-                        f"SpotOrdersDB check existing SELL error: {e}",
-                        level="ERROR",
-                    )
+                    self.logger.log(f"SpotOrdersDB check existing SELL error: {e}", level="ERROR")
 
             if existing_sell:
                 status = (existing_sell.get("status") or "").upper()
@@ -405,9 +433,8 @@ class Strategy:
                     if hasattr(self, "grid_filled"):
                         self.grid_filled[entry] = False   # ถือว่าปล่อย grid นี้แล้ว
                     self.logger.log(
-                        f"Skip _check_sell: existing SELL order grid_id={grid_id}, "
-                        f"entry={entry}, price={price}, status={status}",
-                        level="INFO",
+                        f"Skip _check_sell: existing SELL order grid_id={grid_id} entry={entry}, price={price}, status={status}",
+                        level="INFO"
                     )
                     continue
 
@@ -479,11 +506,7 @@ class Strategy:
                 self.grid_filled[entry] = False
 
             # -------- 7) Log สรุปผล --------
-            self.logger.log(
-                f"Grid SELL: entry={entry}, sell_price={price}, qty={qty}, "
-                f"notional={notional}, fee={fee}, pnl={pnl}, mode={self.mode}",
-                level="DEBUG",
-            )
+            self.logger.log(f"Grid SELL: entry={entry}, sell_price={price}, qty={qty}, notional={notional}, fee={fee}, pnl={pnl}, mode={self.mode}", level="DEBUG")
 
         # -------- 8) เก็บ positions ที่ยังไม่ถึงเป้าไว้ต่อ --------
         self.positions = remaining_positions
@@ -511,24 +534,19 @@ class Strategy:
         notional = self.order_size_usdt
         fee      = notional * self.spot_fee
         target   = round(price + spacing, 4)
-        now_ms   = timestamp
 
         is_paper_mode = self.mode in ("backtest", "forward_test")
         has_spot_db   = hasattr(self, "spot_orders_db") and self.spot_orders_db is not None
         has_exch      = getattr(self, "exchange_sync", None) is not None
-
-        grid_id = getattr(self, "grid_group_id", None) or str(price)
+        grid_id       = getattr(self, "grid_group_id", None) or str(price)
 
         # ---------- 0) CHECK: in-memory flag ----------
         if hasattr(self, "grid_filled"):
             if self.grid_filled.get(price, False):
-                self.logger.log(
-                    f"Skip _buy_grid: grid price {price} already marked filled in memory",
-                    level="DEBUG",
-                )
+                self.logger.log(f"Skip _buy_grid: grid price {price} already marked filled in memory", level="DEBUG")
                 return
 
-        # ---------- 1) CHECK: live mode → ถาม exchange ก่อน ----------
+        # ---------- 1) CHECK: In live mode, List all Opsition that wait to matching in the exchange before ----------
         if self.mode == "live" and has_exch:
             try:
                 # ให้ ExchangeSync เช็คว่ามี open BUY ที่ grid นี้อยู่แล้วไหม
@@ -536,10 +554,7 @@ class Strategy:
                 if ex_state.get(price):
                     if hasattr(self, "grid_filled"):
                         self.grid_filled[price] = True
-                    self.logger.log(
-                        f"Skip _buy_grid: exchange reports existing BUY at price={price}",
-                        level="INFO",
-                    )
+                    self.logger.log(f"Skip _buy_grid: exchange reports existing BUY at price={price}", level="INFO")
                     return
             except Exception as e:
                 self.logger.log(f"Exchange sync_grid_state error: {e}", level="ERROR")
@@ -573,10 +588,7 @@ class Strategy:
                     qty=qty,
                     exchange=True,
                 )
-                self.logger.log(
-                    f"[LIVE] Place limit BUY {qty} {self.symbol} @ {price} (grid_id={grid_id})",
-                    level="INFO",
-                )
+                self.logger.log(f"[LIVE] Place limit BUY {qty} {self.symbol} @ {price} (grid_id={grid_id})",level="INFO")
             except Exception as e:
                 self.logger.log(f"Live BUY order error: {e}", level="ERROR")
                 return
@@ -612,24 +624,16 @@ class Strategy:
         # ---------- 7) PAPER MODE → ถือว่า fill ทันที ----------
         if is_paper_mode:
             self.available_capital -= (notional + fee)
-            self.positions.append(
-                {
+            self.positions.append({
                     "qty":       qty,
                     "entry":     price,
                     "target":    target,
                     "spacing":   spacing,
                     "timestamp": timestamp,
-                }
-            )
-            self.logger.log(
-                f"[PAPER] Grid BUY filled @ {price}, target={target}, qty={qty}, fee={fee}",
-                level="DEBUG",
-            )
+            })
+            self.logger.log(f"[PAPER] Grid BUY filled @ {price}, target={target}, qty={qty}, fee={fee}",level="DEBUG")
         else:
-            self.logger.log(
-                f"[LIVE] Grid BUY order placed @ {price}, qty={qty}, spacing={spacing} (waiting fill)",
-                level="DEBUG",
-            )
+            self.logger.log(f"[LIVE] Grid BUY order placed @ {price}, qty={qty}, spacing={spacing} (waiting fill)",level="DEBUG")
 
     def sync_spot_orders_from_exchange(self) -> None:
         """

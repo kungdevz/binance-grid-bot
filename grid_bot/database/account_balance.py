@@ -16,36 +16,38 @@ class AccountBalance(BaseMySQLRepo):
     def _ensure_table(self):
         conn = self._get_conn()  # use _get_conn(), not super()._get_conn()
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS `account_balance` (
-                `id` INT AUTO_INCREMENT PRIMARY KEY,              -- ไอดีอัตโนมัติ
-                `record_date` DATE NOT NULL,                      -- วันที่บันทึก (YYYY-MM-DD)
-                `record_time` TIME NOT NULL,                      -- เวลาบันทึก (HH:MM:SS)
-                `start_balance_usdt` DECIMAL(18,6) NOT NULL,      -- ยอดเงินเริ่มต้น (USDT)
-                `net_flow_usdt` DECIMAL(18,6) DEFAULT 0,          -- ฝาก–ถอนสุทธิ (USDT)
-                `realized_pnl_usdt` DECIMAL(18,6) DEFAULT 0,      -- กำไร/ขาดทุนที่ปิดแล้ว (USDT)
-                `unrealized_pnl_usdt` DECIMAL(18,6) DEFAULT 0,    -- กำไร/ขาดทุนที่ลอยตัว (USDT)
-                `fees_usdt` DECIMAL(18,6) DEFAULT 0,              -- ค่าธรรมเนียมทั้งหมด (USDT)
-                `end_balance_usdt` DECIMAL(18,6) NOT NULL,        -- ยอดเงินสุดท้าย (USDT)
-                `notes` TEXT                                      -- หมายเหตุ (เช่น เปิด/ปิด hedge, ปรับ grid spacing)
+        try:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS `account_balance` (
+                    `id` INT AUTO_INCREMENT PRIMARY KEY,              -- ไอดีอัตโนมัติ
+                    `record_date` DATE NOT NULL,                      -- วันที่บันทึก (YYYY-MM-DD)
+                    `record_time` TIME NOT NULL,                      -- เวลาบันทึก (HH:MM:SS)
+                    `start_balance_usdt` DECIMAL(18,6) NOT NULL,      -- ยอดเงินเริ่มต้น (USDT)
+                    `net_flow_usdt` DECIMAL(18,6) DEFAULT 0,          -- ฝาก–ถอนสุทธิ (USDT)
+                    `realized_pnl_usdt` DECIMAL(18,6) DEFAULT 0,      -- กำไร/ขาดทุนที่ปิดแล้ว (USDT)
+                    `unrealized_pnl_usdt` DECIMAL(18,6) DEFAULT 0,    -- กำไร/ขาดทุนที่ลอยตัว (USDT)
+                    `fees_usdt` DECIMAL(18,6) DEFAULT 0,              -- ค่าธรรมเนียมทั้งหมด (USDT)
+                    `end_balance_usdt` DECIMAL(18,6) NOT NULL,        -- ยอดเงินสุดท้าย (USDT)
+                    `notes` TEXT                                      -- หมายเหตุ (เช่น เปิด/ปิด hedge, ปรับ grid spacing)
+                )
+                """
             )
-            """
-        )
 
-        cursor.execute("""
-            SELECT COUNT(1) FROM INFORMATION_SCHEMA.STATISTICS
-            WHERE TABLE_SCHEMA = DATABASE()
-            AND TABLE_NAME = 'account_balance'
-            AND INDEX_NAME = 'ux_asset';
-        """)
-        
-        if cursor.fetchone()[0] == 0:
-            cursor.execute("CREATE INDEX ux_asset ON account_balance(id, record_date, record_time)")
+            cursor.execute("""
+                SELECT COUNT(1) FROM INFORMATION_SCHEMA.STATISTICS
+                WHERE TABLE_SCHEMA = DATABASE()
+                AND TABLE_NAME = 'account_balance'
+                AND INDEX_NAME = 'ux_asset';
+            """)
+            
+            if cursor.fetchone()[0] == 0:
+                cursor.execute("CREATE INDEX ux_asset ON account_balance(id, record_date, record_time)")
 
-        conn.commit()
-        cursor.close()
-        conn.close()
+            conn.commit()
+        finally:
+            cursor.close()
+            conn.close()
 
     def insert_balance(self, data: Dict[str, Any]) -> int:
         """
@@ -63,12 +65,14 @@ class AccountBalance(BaseMySQLRepo):
         cursor = conn.cursor()
         sql = f"INSERT INTO account_balance ({', '.join(cols)}) VALUES ({placeholders})"
 
-        cursor.execute(sql, values)
-        row_id = cursor.lastrowid
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return row_id
+        try:
+            cursor.execute(sql, values)
+            row_id = cursor.lastrowid
+            conn.commit()
+            return row_id
+        finally:
+            cursor.close()
+            conn.close()
     
     def delete_balance(self, record_id: int) -> None:
         """
@@ -76,13 +80,15 @@ class AccountBalance(BaseMySQLRepo):
         """
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM account_balance WHERE id = ?",
-            (record_id,)
-        )
-        conn.commit()
-        cursor.close()
-        conn.close()
+        try:
+            cursor.execute(
+                "DELETE FROM account_balance WHERE id = ?",
+                (record_id,)
+            )
+            conn.commit()
+        finally:
+            cursor.close()
+            conn.close()
     
     def delete_balances_older_than(self, cutoff_date: str) -> None:
         """
@@ -91,13 +97,15 @@ class AccountBalance(BaseMySQLRepo):
         """
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM account_balance WHERE record_date < ?",
-            (cutoff_date,)
-        )
-        conn.commit()
-        cursor.close()
-        conn.close()
+        try:
+            cursor.execute(
+                "DELETE FROM account_balance WHERE record_date < ?",
+                (cutoff_date,)
+            )
+            conn.commit()
+        finally:
+            cursor.close()
+            conn.close()
     
     def delete_all_balances(self) -> None:
         """
@@ -105,10 +113,12 @@ class AccountBalance(BaseMySQLRepo):
         """
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM account_balance")
-        conn.commit()
-        cursor.close()
-        conn.close()
+        try:
+            cursor.execute("DELETE FROM account_balance")
+            conn.commit()
+        finally:
+            cursor.close()
+            conn.close()
     
     def drop_table(self) -> None:
         """
@@ -116,7 +126,9 @@ class AccountBalance(BaseMySQLRepo):
         """
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute("DROP TABLE IF EXISTS account_balance")
-        conn.commit()
-        cursor.close()
-        conn.close()
+        try:
+            cursor.execute("DROP TABLE IF EXISTS account_balance")
+            conn.commit()
+        finally:
+            cursor.close()
+            conn.close()

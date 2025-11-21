@@ -3,29 +3,40 @@ import json
 import os
 import pandas as pd
 import websockets
-from grid_bot.strategy import Strategy
+from grid_bot.backtest_strategy import BacktestGridStrategy
+from grid_bot.live_strategy import LiveGridStrategy
+from grid_bot.database.logger import Logger
 
 async def main():
 
+    logger = Logger()
     mode = os.getenv('MODE')
     spot_symbol = os.getenv('SYMBOL')
     futures_symbol = os.getenv('FUTURES_SYMBOL') 
 
-    bot = Strategy(
-        symbol=spot_symbol,
-        futures_symbol=futures_symbol,
-        atr_period=int(os.getenv('ATR_PERIOD')),
-        atr_mean_window=int(os.getenv('ATR_MEAN_WINDOW')),
-        mode=mode
-    )
+    # bot = Strategy(
+    #     symbol=spot_symbol,
+    #     futures_symbol=futures_symbol,
+    #     atr_period=int(os.getenv('ATR_PERIOD')),
+    #     atr_mean_window=int(os.getenv('ATR_MEAN_WINDOW')),
+    #     mode=mode
+    # )
 
     if mode == 'backtest':
+        bt = BacktestGridStrategy(
+            symbol=spot_symbol,
+            symbol_future=futures_symbol,
+            initial_capital=1000,
+            grid_levels=5,
+            atr_multiplier=1.0,
+            order_size_usdt=140,
+            reserve_ratio=0.3,
+            logger=logger,
+        )
         file_path = os.getenv('OHLCV_FILE')
         if not file_path or not os.path.exists(file_path):
             raise ValueError('OHLCV_FILE must be set in env or config for backtest and point to an existing file')
-        bot.run_from_file(file_path)
-    elif mode == 'forward_test':
-        print('✅ Bot initialized for forward_test mode')
+        bt._run(file_path)
     else:
         print('✅ Bot initialized for live mode')
     

@@ -9,60 +9,77 @@ class OhlcvData(BaseMySQLRepo):
         conn = self._get_conn()
         cursor = conn.cursor()
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS ohlcv_data (
-                symbol        VARCHAR(20)   NOT NULL,
-                timestamp     BIGINT        NOT NULL,
-                open          DOUBLE        NOT NULL,
-                high          DOUBLE        NOT NULL,
-                low           DOUBLE        NOT NULL,
-                close         DOUBLE        NOT NULL,
-                volume        DOUBLE        NOT NULL,
-                tr            DOUBLE        NOT NULL,
-                atr_14        DOUBLE        NOT NULL,
-                atr_28        DOUBLE        NOT NULL,
-                ema_14        DOUBLE        NOT NULL,
-                ema_28        DOUBLE        NOT NULL,
-                ema_50        DOUBLE        NOT NULL,
-                ema_100       DOUBLE        NOT NULL,
-                ema_200       DOUBLE        NOT NULL,
-                PRIMARY KEY (symbol, timestamp)
-            )
-        """)
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS ohlcv_data (
+                    symbol        VARCHAR(20)   NOT NULL,
+                    timestamp     BIGINT        NOT NULL,
+                    open          DOUBLE        NOT NULL,
+                    high          DOUBLE        NOT NULL,
+                    low           DOUBLE        NOT NULL,
+                    close         DOUBLE        NOT NULL,
+                    volume        DOUBLE        NOT NULL,
+                    tr            DOUBLE        NOT NULL,
+                    atr_14        DOUBLE        NOT NULL,
+                    atr_28        DOUBLE        NOT NULL,
+                    ema_14        DOUBLE        NOT NULL,
+                    ema_28        DOUBLE        NOT NULL,
+                    ema_50        DOUBLE        NOT NULL,
+                    ema_100       DOUBLE        NOT NULL,
+                    ema_200       DOUBLE        NOT NULL,
+                    PRIMARY KEY (symbol, timestamp)
+                )
+            """)
 
-        cursor.execute("""
-            SELECT COUNT(1) FROM INFORMATION_SCHEMA.STATISTICS
-            WHERE TABLE_SCHEMA = DATABASE()
-            AND TABLE_NAME = 'ohlcv_data'
-            AND INDEX_NAME = 'idx_ohlcv_data';
-        """)
-        
-        if cursor.fetchone()[0] == 0:
-            cursor.execute("CREATE INDEX idx_ohlcv_data ON ohlcv_data(timestamp, symbol)")
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
+            cursor.execute("""
+                SELECT COUNT(1) FROM INFORMATION_SCHEMA.STATISTICS
+                WHERE TABLE_SCHEMA = DATABASE()
+                AND TABLE_NAME = 'ohlcv_data'
+                AND INDEX_NAME = 'idx_ohlcv_data';
+            """)
+            
+            if cursor.fetchone()[0] == 0:
+                cursor.execute("CREATE INDEX idx_ohlcv_data ON ohlcv_data(timestamp, symbol)")
+            
+            conn.commit()
+            
+        finally:
+            cursor.close()
+            conn.close()
 
-    def insert_ohlcv_data(self, symbol, timestamp, open, high, low, close, volume, tr, atr_14, atr_28, ema: dict) -> int:
+    def insert_ohlcv_data(self, symbol, timestamp, open, high, low, close, volume, tr, 
+                          atr_14, atr_28, ema_14, ema_28, ema_50, ema_100, ema_200) -> int:
 
         try:
 
             conn = self._get_conn()
             cursor = conn.cursor()
 
-            insert_sql = '''
+            insert_sql = """
                 INSERT INTO ohlcv_data(
-                    symbol, timestamp, open, high, low, close, volume,
-                    tr, atr_14, atr_28, 
-                    ema_14, ema_28, ema_50, ema_100, ema_200
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            '''
+                        symbol, timestamp, open, high, low, close, volume,
+                        tr, atr_14, atr_28, ema_14, ema_28, ema_50, ema_100, ema_200
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, 
+                          %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                    open = VALUES(open),
+                    high = VALUES(high),
+                    low = VALUES(low),
+                    close = VALUES(close),
+                    volume = VALUES(volume),
+                    tr = VALUES(tr),
+                    atr_14 = VALUES(atr_14),
+                    atr_28 = VALUES(atr_28),
+                    ema_14 = VALUES(ema_14),
+                    ema_28 = VALUES(ema_28),
+                    ema_50 = VALUES(ema_50),
+                    ema_100 = VALUES(ema_100),
+                    ema_200 = VALUES(ema_200)
+            """
 
             cursor.execute(insert_sql, (
                 symbol, timestamp, open, high, low, close, volume,
-                tr, atr_14, atr_28,
-                ema["ema_14"], ema["ema_28"], ema["ema_50"], ema["ema_100"], ema["ema_200"]
+                tr, atr_14, atr_28,ema_14, ema_28, ema_50, ema_100, ema_200
             ))
 
             conn.commit()
@@ -77,45 +94,45 @@ class OhlcvData(BaseMySQLRepo):
         cursor = conn.cursor()
 
         delete_sql = 'DELETE FROM ohlcv_data WHERE symbol = %s AND timestamp = %s'
-        cursor.execute(delete_sql, (symbol, timestamp))
+        try:
+            cursor.execute(delete_sql, (symbol, timestamp))
 
-        affected_rows = cursor.rowcount
-        conn.commit()
+            affected_rows = cursor.rowcount
+            conn.commit()
+            return affected_rows
+        finally:
+            cursor.close()
+            conn.close()
 
-        cursor.close()
-        conn.close()
-
-        return affected_rows
-    
     def delete_ohlcv_older_than(self, symbol: str, timestamp: int) -> int:
         conn = self._get_conn()
         cursor = conn.cursor()
 
         delete_sql = 'DELETE FROM ohlcv_data WHERE symbol = %s AND timestamp < %s'
-        cursor.execute(delete_sql, (symbol, timestamp))
+        try:
+            cursor.execute(delete_sql, (symbol, timestamp))
 
-        affected_rows = cursor.rowcount
-        conn.commit()
-
-        cursor.close()
-        conn.close()
-
-        return affected_rows
+            affected_rows = cursor.rowcount
+            conn.commit()
+            return affected_rows
+        finally:
+            cursor.close()
+            conn.close()
     
     def delete_ohlcv_by_symbol(self, symbol: str) -> int:
         conn = self._get_conn()
         cursor = conn.cursor()
 
         delete_sql = 'DELETE FROM ohlcv_data WHERE symbol = %s'
-        cursor.execute(delete_sql, (symbol,))
 
-        affected_rows = cursor.rowcount
-        conn.commit()
-
-        cursor.close()
-        conn.close()
-
-        return affected_rows
+        try:
+            cursor.execute(delete_sql, (symbol,))
+            affected_rows = cursor.rowcount
+            conn.commit()
+            return affected_rows
+        finally:
+            cursor.close()
+            conn.close()
     
     def get_recent_ohlcv_by_timestamp(self, symbol: str, timestamp: int, limit: int) -> List[Dict[str, Any]]:
         conn = self._get_conn()

@@ -8,21 +8,13 @@ class ExchangeSync:
     """
     Sync grid state and orders with exchange.
     """
-    def __init__(self, symbol_spot: str, symbol_future: str, mode: str = 'forward_test'):
+    def __init__(self, symbol_spot: str, symbol_future: str, test_net: bool = False):
 
         self.symbol_spot = symbol_spot
         self.symbol_futures = symbol_future
-        if mode == 'live':
-            self.spot = self.create_spot_exchanges(testnet=False)
-            self.futures = self.create_future_exchanges(testnet=False)
-            self.ensure_markets_loaded()
-        elif mode == 'forward_test' or mode == 'back_test':
-            self.spot = self.create_spot_exchanges(testnet=True)
-            self.futures = self.create_future_exchanges(testnet=True)
-            self.ensure_markets_loaded()
-        else:
-            self.spot = None
-            self.futures = None
+        self.spot = self.create_spot_exchanges(testnet=test_net)
+        self.futures = self.create_future_exchanges(testnet=test_net)
+        self.ensure_markets_loaded()
         
     def ensure_markets_loaded(self):
         if not self.spot.markets:
