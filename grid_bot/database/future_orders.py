@@ -165,3 +165,28 @@ class FuturesOrders(BaseMySQLRepo):
         finally:
             cursor.close()
             conn.close()
+
+    def close_open_orders_by_group(self, symbol: str, reason: str = "RECENTER") -> int:
+        """
+        Logical cancel: mark open futures orders for a symbol as canceled/closed.
+        Futures table has no grid_id; scope by symbol only.
+        """
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE futures_orders
+                   SET status = 'CANCELED',
+                       is_working = 0,
+                       update_time = UNIX_TIMESTAMP() * 1000
+                 WHERE symbol = %s
+                   AND status IN ('NEW', 'PARTIALLY_FILLED', 'OPEN')
+                """,
+                (symbol,),
+            )
+            conn.commit()
+            return cursor.rowcount
+        finally:
+            cursor.close()
+            conn.close()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import time
 from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import numpy as np
@@ -331,9 +332,10 @@ class BaseGridStrategy(IGridIO):
 
     def _maybe_recenter_grid(self, timestamp_ms: int, price: float, atr_14: float, atr_28: float) -> None:
         """
-        Hard rebuild:
-        - เมื่อราคาออกนอกกรอบเดิมหลายช่อง หรือกริดถูกใช้ไปเกือบหมด
-        - จะเลื่อนหน้าต่าง grid ให้ไปอยู่ใกล้ราคาปัจจุบันมากขึ้น (lower-only grid)
+        Decision layer for hard recenter.
+        - check grid existence
+        - drift / fill ratio
+        - hedge PnL guard (skip if hedge loss)
         """
         if not self.grid_prices:
             return
@@ -344,85 +346,33 @@ class BaseGridStrategy(IGridIO):
         if spacing <= 0 and atr_14 > 0:
             spacing = atr_14 * self.atr_multiplier
         if spacing <= 0:
-            # ไม่มีข้อมูลพอจะตัดสินใจ
             return
 
         lowest = min(self.grid_prices)
         highest = max(self.grid_prices)
 
-        # ดูว่าใช้ grid ไปแล้วกี่ level
+        # state of usage
         filled_levels = sum(1 for p in self.grid_prices if self.grid_filled.get(p, False))
         fill_ratio = filled_levels / len(self.grid_prices) if self.grid_prices else 0.0
 
         need_recenter = False
-        reason = ""
-
-        # 1) ราคาออกนอกกรอบหลายช่อง
-        if price > highest + spacing * self.drift_k:
+        if price > highest + spacing * self.drift_k or price < lowest - spacing * self.drift_k:
             need_recenter = True
-            reason = f"price above window (>{self.drift_k} * spacing)"
-        elif price < lowest - spacing * self.drift_k:
-            need_recenter = True
-            reason = f"price below window (>{self.drift_k} * spacing)"
-
-        # 2) ใช้ grid ไปเยอะมาก (เช่นซื้อฝั่งล่างเกือบหมด)
         elif fill_ratio > 0.7:
             need_recenter = True
-            reason = f"filled_levels={fill_ratio:.2%}"
 
         if not need_recenter:
             return
 
-        # ----- สร้าง grid ใหม่รอบราคาปัจจุบัน -----
-        # center ใหม่: ใช้ price เป็นหลักก่อน (จะไปผูกกับ EMA50 ก็ได้)
-        new_center = float(price)
+        # hedge guard: skip recenter if hedge would be closed at loss
+        if self.hedge_position:
+            h = self.hedge_position
+            hedge_pnl = (float(h["entry"]) - float(price)) * float(h["qty"])
+            if hedge_pnl < 0:
+                self.logger.log(f"[GRID] skip recenter due hedge loss (pnl={hedge_pnl:.4f})", level="INFO")
+                return
 
-        # spacing ใหม่จาก ATR ปัจจุบัน
-        new_spacing = spacing
-        if atr_14 > 0:
-            new_spacing = atr_14 * self.atr_multiplier
-
-        if new_spacing <= 0:
-            new_spacing = spacing  # fallback
-
-        new_prices = [round(new_center - new_spacing * (i + 1), 4) for i in range(self.grid_levels)]
-        new_prices = sorted(new_prices)
-
-        new_group_id = util.generate_order_id("INIT")
-        now = datetime.now()
-        now_date = now.strftime("%Y-%m-%d")
-        now_time = now.strftime("%H:%M:%S")
-        now_dt = now.strftime("%Y-%m-%d %H:%M:%S")
-
-        # เขียน state grid ใหม่ลง DB (ไม่ไปยุ่งของเก่า – แยก group_id)
-        for p in new_prices:
-            item = {
-                "symbol": self.symbol,
-                "grid_price": float(p),
-                "use_status": "Y",
-                "group_id": new_group_id,
-                "base_price": float(new_center),
-                "spacing": float(new_spacing),
-                "date": now_date,
-                "time": now_time,
-                "create_date": now_dt,
-                "status": "open",
-            }
-            try:
-                self.grid_db.save_state(item)
-            except Exception as e:
-                self.logger.log(f"[GRID] save_state error during recenter: {e}", level="ERROR")
-
-        # อัปเดต runtime state ให้ใช้ชุดใหม่
-        self.grid_group_id = new_group_id
-        self.grid_prices = new_prices
-        self.grid_spacing = float(new_spacing)
-        self.grid_filled = {p: False for p in new_prices}
-
-        self.logger.log(
-            f"[GRID] recentered around {new_center} (reason={reason}), " f"spacing={new_spacing}, prices={new_prices}",
-            level="INFO",
-        )
+        self._do_full_recenter(timestamp_ms=timestamp_ms, price=price, atr_14=atr_14, atr_28=atr_28)
 
     def _recalc_spacing_if_needed(self, atr_14: float, atr_28: float, curr_spacing: float) -> float:
         """
@@ -442,8 +392,7 @@ class BaseGridStrategy(IGridIO):
             # fallback ถ้ายังไม่มีอะไรเลย
             old_spacing = atr_14 * self.atr_multiplier
 
-        new_spacing = old_spacing
-
+        new_spacing = 0.0
         # volatility regime
         if atr_14 > atr_28 * self.vol_up_ratio:
             # ตลาดผันผวนมาก → ขยายระยะห่าง grid
@@ -452,21 +401,21 @@ class BaseGridStrategy(IGridIO):
             # ตลาดสงบ → หด grid ลง
             new_spacing = atr_14 * self.atr_multiplier * 1.0
 
-        grid_spacing = float(new_spacing)
-        self.logger.log(
-            f"[GRID] spacing adjusted from {old_spacing:.4f} to {new_spacing:.4f} " f"(ATR14={atr_14:.4f}, ATR28={atr_28:.4f})",
-            level="INFO",
-        )
-        return grid_spacing
+        if new_spacing <= 0:
+            return old_spacing
+        else:
+            return new_spacing
 
-    def _init_lower_grid(self, base_price: float, atr: float) -> None:
+    def _init_lower_grid(self, base_price: float, atr: float, spacing_override: Optional[float] = None) -> None:
         """
         Create LOWER-only grid (the requirement USDT-only buy low and sell high at the base price)
         """
-        if atr <= 0:
-            spacing = base_price * 0.03  # fallback 3%, If the ATR value is less than 0
-        else:
-            spacing = atr * self.atr_multiplier
+        spacing = spacing_override if spacing_override and spacing_override > 0 else None
+        if spacing is None:
+            if atr <= 0:
+                spacing = base_price * 0.03  # fallback 3%, If the ATR value is less than 0
+            else:
+                spacing = atr * self.atr_multiplier
 
         # เก็บ spacing ปัจจุบันไว้ใช้ตอน recalc
         self.grid_spacing = float(spacing)
@@ -498,6 +447,116 @@ class BaseGridStrategy(IGridIO):
 
         self.logger.log(
             f"Grid initialized (LOWER only) base={base_price}, group={self.grid_group_id}, prices={self.grid_prices}",
+            level="INFO",
+        )
+
+    def _compute_recenter_spacing(self, price: float, atr_14: float, atr_28: float, prior_spacing: float = 0.0) -> float:
+        """
+        Hard recenter spacing logic using ATR regime.
+        """
+        spacing = 0.0
+        if atr_14 > 0:
+            base = atr_14 * self.atr_multiplier
+            if atr_28 > 0:
+                ratio = atr_14 / atr_28
+                if ratio >= self.vol_up_ratio:
+                    spacing = base * 1.3
+                elif ratio <= self.vol_down_ratio:
+                    spacing = base * 0.8
+                else:
+                    spacing = base
+            else:
+                spacing = base
+        else:
+            spacing = prior_spacing if prior_spacing and prior_spacing > 0 else 0.0
+
+        if spacing <= 0:
+            spacing = price * 0.03
+
+        return float(spacing)
+
+    def _do_full_recenter(self, timestamp_ms: int, price: float, atr_14: float, atr_28: float) -> None:
+        """
+        Execute full recenter pipeline:
+        - close hedge if non-negative PnL
+        - rebalance spot using hedge profit
+        - liquidate remaining spot to free USDT
+        - deactivate old grid and open orders
+        - build new lower-only grid using ATR regime spacing
+        """
+        old_group = self.grid_group_id
+        prior_spacing = self.grid_spacing
+
+        # -------- Hedge management --------
+        if self.hedge_position:
+            h = self.hedge_position
+            hedge_qty = float(h["qty"])
+            hedge_entry = float(h["entry"])
+            hedge_pnl = (hedge_entry - price) * hedge_qty  # short
+
+            if hedge_pnl < 0:
+                # safety guard already checked, but double-check
+                self.logger.log(f"[HEDGE] skip recenter due hedge loss: pnl={hedge_pnl:.4f}", level="INFO")
+                return
+
+            try:
+                self._io_close_hedge(qty=hedge_qty, price=price, reason="RECENTER")
+            except Exception as e:
+                self.logger.log(f"[HEDGE] close error during recenter: {e}", level="ERROR")
+            self.hedge_position = None
+
+            # use hedge profit to rebalance spot
+            try:
+                self._rebalance_spot_after_hedge(timestamp_ms=timestamp_ms, hedge_pnl=hedge_pnl, price=price)
+            except Exception as e:
+                self.logger.log(f"[HEDGE] rebalance spot error: {e}", level="ERROR")
+
+        # -------- Force close remaining spot --------
+        remaining_positions: List[Position] = []
+        is_paper_mode = self.mode in ("backtest", "forward_test")
+        for pos in self.positions:
+            try:
+                self._io_place_spot_sell(timestamp_ms=timestamp_ms, position=pos, sell_price=price)
+                if is_paper_mode:
+                    notional = price * pos.qty
+                    pnl = (price - pos.entry_price) * pos.qty
+                    self.available_capital += notional
+                    self.realized_grid_profit += pnl
+            except Exception as e:
+                self.logger.log(f"[RECENTER] spot sell error entry={pos.entry_price}: {e}", level="ERROR")
+                remaining_positions.append(pos)
+
+        self.positions = remaining_positions if self.mode == "live" else []
+
+        # -------- Deactivate old grid + orders --------
+        if old_group:
+            try:
+                self.grid_db.deactivate_group(symbol=self.symbol, group_id=old_group, reason="RECENTER")
+            except Exception as e:
+                self.logger.log(f"[GRID] deactivate_group error: {e}", level="ERROR")
+            try:
+                self.spot_orders_db.close_open_orders_by_group(symbol=self.symbol, grid_id=old_group, reason="RECENTER")
+            except Exception as e:
+                self.logger.log(f"[SPOT] close_open_orders_by_group error: {e}", level="ERROR")
+
+        try:
+            self.futures_db.close_open_orders_by_group(symbol=self.symbol_future, reason="RECENTER")
+        except Exception as e:
+            self.logger.log(f"[FUTURES] close_open_orders_by_group error: {e}", level="ERROR")
+
+        # reset in-memory grid/hedge
+        self.grid_prices = []
+        self.grid_filled = {}
+        self.grid_group_id = None
+        self.grid_spacing = 0.0
+        self.hedge_position = None
+
+        # -------- Build new grid --------
+        new_spacing = self._compute_recenter_spacing(price=price, atr_14=atr_14, atr_28=atr_28, prior_spacing=prior_spacing)
+        self._init_lower_grid(base_price=price, atr=atr_14, spacing_override=new_spacing)
+
+        self.logger.log(
+            f"[GRID] recentered → new group={self.grid_group_id}, spacing={new_spacing:.6f}, prices={self.grid_prices}",
             level="INFO",
         )
 
@@ -552,17 +611,20 @@ class BaseGridStrategy(IGridIO):
         else:
 
             old_spacing = self.grid_spacing
-            new_spacing = self._recalc_spacing_if_needed(atr_14=atr_14, atr_28=atr_28)
+            new_spacing = self._recalc_spacing_if_needed(atr_14=atr_14, atr_28=atr_28, curr_spacing=old_spacing)
 
             # ต้องต่างกันมากกว่า 20% ถึงจะปรับ น้อยกว่านั้นจะไม่ปรับ เพื่อลด churn
             if old_spacing > 0 and abs(new_spacing - old_spacing) / old_spacing > 0.2:
+                self.logger.log(f"[GRID] spacing adjusted from {old_spacing:.4f} to {new_spacing:.4f} " f"(ATR14={atr_14:.4f}, ATR28={atr_28:.4f})", level="INFO")
                 self.grid_spacing = new_spacing
-                self._maybe_recenter_grid(
-                    timestamp_ms=timestamp_ms,
-                    price=price,
-                    atr_14=atr_14,
-                    atr_28=atr_28,
-                )
+
+            # ตรวจสอบ drift/fill → recenter แบบเต็มรูปแบบ
+            self._maybe_recenter_grid(
+                timestamp_ms=timestamp_ms,
+                price=price,
+                atr_14=atr_14,
+                atr_28=atr_28,
+            )
 
         # ===============================================================
         # 5) Process BUY / SELL / HEDGE
@@ -968,7 +1030,7 @@ class BaseGridStrategy(IGridIO):
                 )
                 buffer -= loss_if_sell
                 self.logger.log(
-                    f"[REBAL] cut spot entry={p['entry']:.4f}, qty={p['qty']:.4f}, " f"loss={pos_unreal:.4f}, buffer_left={buffer:.4f}",
+                    f"[REBAL] cut spot entry={p.entry_price:.4f}, qty={p.qty:.4f}, " f"loss={pos_unreal:.4f}, buffer_left={buffer:.4f}",
                     level="INFO",
                 )
             except Exception as e:
@@ -1181,12 +1243,12 @@ class BaseGridStrategy(IGridIO):
         if hedge_pnl <= 0 or not self.positions:
             return
 
-        positions_sorted = sorted(self.positions, key=lambda p: p["entry"], reverse=True)
+        positions_sorted = sorted(self.positions, key=lambda p: p.entry_price, reverse=True)
         buffer = hedge_pnl
         new_positions = []
 
         for p in positions_sorted:
-            pos_unreal = (price - p["entry"]) * p["qty"]  # มักจะติดลบ
+            pos_unreal = (price - p.entry_price) * p.qty  # มักจะติดลบ
             if pos_unreal >= 0:
                 # position ที่ไม่ขาดทุน → ยังเก็บไว้
                 new_positions.append(p)
@@ -1207,7 +1269,8 @@ class BaseGridStrategy(IGridIO):
                 )
                 buffer -= loss_if_sell
                 self.logger.log(
-                    f"[REBAL] cut spot entry={p['entry']:.4f}, qty={p['qty']:.4f}, " f"loss={pos_unreal:.4f}, buffer_left={buffer:.4f}",
+                    f"[REBAL] cut spot entry={p.entry_price:.4f}, qty={p.qty:.4f}, "
+                    f"loss={pos_unreal:.4f}, buffer_left={buffer:.4f}",
                     level="INFO",
                 )
             except Exception as e:

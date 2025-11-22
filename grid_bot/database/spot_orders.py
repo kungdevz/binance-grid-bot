@@ -192,6 +192,32 @@ class SpotOrders(BaseMySQLRepo):
         cursor.close()
         conn.close()
 
+    def close_open_orders_by_group(self, symbol: str, grid_id: str, reason: str = "RECENTER") -> int:
+        """
+        Logical cancel: mark open orders in a grid group as CANCELED and not working.
+        Schema has no reason column; reason is informational for logging.
+        """
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE spot_orders
+                   SET status = 'CANCELED',
+                       is_working = 0,
+                       updated_at = CURRENT_TIMESTAMP
+                 WHERE symbol = %s
+                   AND grid_id = %s
+                   AND status IN ('NEW', 'PARTIALLY_FILLED', 'OPEN')
+                """,
+                (symbol, grid_id),
+            )
+            conn.commit()
+            return cursor.rowcount
+        finally:
+            cursor.close()
+            conn.close()
+
     def delete_order(self, order_id: str) -> None:
         """Delete a spot order by Binance order_id."""
         conn = self._get_conn()

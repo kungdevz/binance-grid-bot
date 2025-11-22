@@ -171,3 +171,26 @@ class GridState(BaseMySQLRepo):
         finally:
             cursor.close()
             conn.close()
+
+    def deactivate_group(self, symbol: str, group_id: str, reason: str = "RECENTER") -> int:
+        """
+        Mark all rows of a grid group as inactive (use_status='N').
+        Schema has no reason column, so `reason` is informational only.
+        """
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE grid_state
+                   SET use_status = 'N',
+                       update_date = CURRENT_TIMESTAMP
+                 WHERE symbol = %s AND group_id = %s
+                """,
+                (symbol, group_id),
+            )
+            conn.commit()
+            return cursor.rowcount
+        finally:
+            cursor.close()
+            conn.close()
