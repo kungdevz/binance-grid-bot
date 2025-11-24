@@ -1,5 +1,7 @@
 import mysql.connector
 from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
+import grid_bot.utils.util as util
 from grid_bot.database.base_database import BaseMySQLRepo
 
 
@@ -82,7 +84,7 @@ class FuturesOrders(BaseMySQLRepo):
             "position_side", "reduce_only", "close_position", "working_type",
             "price_protect", "orig_type", "margin_asset", "leverage"
         ]
-        placeholders = ", ".join("?" for _ in cols)
+        placeholders = ", ".join("%s" for _ in cols)
         values = [data.get(col) for col in cols]
 
         conn = self._get_conn()
@@ -90,7 +92,7 @@ class FuturesOrders(BaseMySQLRepo):
         try:
             cursor.execute(
                 f"INSERT INTO futures_orders ({', '.join(cols)}) VALUES ({placeholders})",
-                values
+                values,
             )
             row_id = cursor.lastrowid
             conn.commit()
@@ -102,17 +104,13 @@ class FuturesOrders(BaseMySQLRepo):
     def get_order(self, order_id: int) -> Optional[Dict[str, Any]]:
         """Fetch a single futures order by Binance order_id."""
         conn = self._get_conn()
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
         try:
             cursor.execute(
-                "SELECT * FROM futures_orders WHERE order_id = ?", (order_id,)
+                "SELECT * FROM futures_orders WHERE order_id = %s", (order_id,)
             )
             row = cursor.fetchone()
-            conn.close()
-            if not row:
-                return None
-            columns = [col[0] for col in cursor.description]
-            return dict(zip(columns, row))
+            return row
         finally:
             cursor.close()
             conn.close()
@@ -120,17 +118,16 @@ class FuturesOrders(BaseMySQLRepo):
     def list_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         """List all futures orders, optionally filtered by symbol."""
         conn = self._get_conn()
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
         try:
             if symbol:
                 cursor.execute(
-                    "SELECT * FROM futures_orders WHERE symbol = ? ORDER BY time", (symbol,)
+                    "SELECT * FROM futures_orders WHERE symbol = %s ORDER BY time", (symbol,)
                 )
             else:
                 cursor.execute("SELECT * FROM futures_orders ORDER BY time")
             rows = cursor.fetchall()
-            columns = [col[0] for col in cursor.description]
-            return [dict(zip(columns, row)) for row in rows]
+            return rows
         finally:
             cursor.close()
             conn.close()
@@ -139,14 +136,14 @@ class FuturesOrders(BaseMySQLRepo):
         """Update fields of a futures order by Binance order_id."""
         if not updates:
             return
-        set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
+        set_clause = ", ".join(f"{k} = %s" for k in updates.keys())
         values = list(updates.values()) + [order_id]
 
         conn = self._get_conn()
         cursor = conn.cursor()
         try:
             cursor.execute(
-                f"UPDATE futures_orders SET {set_clause} WHERE order_id = ?", values
+                f"UPDATE futures_orders SET {set_clause} WHERE order_id = %s", values
             )
             conn.commit()
         finally:
@@ -159,7 +156,7 @@ class FuturesOrders(BaseMySQLRepo):
         cursor = conn.cursor()
         try:
             cursor.execute(
-                "DELETE FROM futures_orders WHERE order_id = ?", (order_id,)
+                "DELETE FROM futures_orders WHERE order_id = %s", (order_id,)
             )
             conn.commit()
         finally:
@@ -190,3 +187,51 @@ class FuturesOrders(BaseMySQLRepo):
         finally:
             cursor.close()
             conn.close()
+
+    def create_hedge_open(self, symbol: str, qty: float, price: float, leverage: int, side: str = "SELL") -> int:
+        """
+        Convenience wrapper to record a hedge open.
+        """
+        data = {
+            "order_id": int(datetime.utcnow().timestamp() * 1000),
+            "client_order_id": util.generate_order_id("HEDGE_OPEN"),
+            "symbol": symbol,
+            "status": "OPEN",
+            "type": "LIMIT",
+            "side": side,
+            "price": price,
+            "avg_price": price,
+            "orig_qty": qty,
+            "executed_qty": qty,
+            "cum_quote": qty * price,
+            "time_in_force": "GTC",
+            "stop_price": 0,
+            "iceberg_qty": 0,
+            "time": int(datetime.utcnow().timestamp() * 1000),
+            "update_time": int(datetime.utcnow().timestamp() * 1000),
+            "is_working": 1,
+            "position_side": "BOTH",
+            "reduce_only": 0,
+            "close_position": 0,
+            "working_type": "CONTRACT_PRICE",
+            "price_protect": 0,
+            "orig_type": "LIMIT",
+            "margin_asset": "USDT",
+            "leverage": leverage,
+        }
+        return self.create_order(data)
+
+    def close_hedge_order(self, order_id: int, close_price: float, realized_pnl: float) -> None:
+        """
+        Mark a hedge order as closed with realized pnl.
+        """
+        self.update_order(
+            order_id=order_id,
+            updates={
+                "status": "CLOSED",
+                "avg_price": close_price,
+                "update_time": int(datetime.utcnow().timestamp() * 1000),
+                "cum_quote": realized_pnl,
+                "is_working": 0,
+            },
+        )

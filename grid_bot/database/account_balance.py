@@ -131,3 +131,43 @@ class AccountBalance(BaseMySQLRepo):
         finally:
             cursor.close()
             conn.close()
+
+    # ---------------- Helpers for SPOT / FUTURES tagging (no schema change) ----------------
+    def insert_balance_with_type(self, account_type: str, balance_usdt: float, available_usdt: float, notes: str = "") -> int:
+        """
+        Insert a balance snapshot tagged by account_type via notes (SPOT/FUTURES).
+        """
+        data = {
+            "record_date": datetime.now().strftime("%Y-%m-%d"),
+            "record_time": datetime.now().strftime("%H:%M:%S"),
+            "start_balance_usdt": balance_usdt,
+            "net_flow_usdt": 0.0,
+            "realized_pnl_usdt": 0.0,
+            "unrealized_pnl_usdt": 0.0,
+            "fees_usdt": 0.0,
+            "end_balance_usdt": available_usdt,
+            "notes": f"{account_type.upper()} {notes}".strip(),
+        }
+        return self.insert_balance(data)
+
+    def get_latest_balance_by_type(self, account_type: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch latest balance row filtered by account_type in notes.
+        """
+        conn = self._get_conn()
+        cursor = conn.cursor(dictionary=True)
+        try:
+            cursor.execute(
+                """
+                SELECT * FROM account_balance
+                 WHERE notes LIKE %s
+                 ORDER BY id DESC
+                 LIMIT 1
+                """,
+                (f"{account_type.upper()}%",),
+            )
+            row = cursor.fetchone()
+            return row
+        finally:
+            cursor.close()
+            conn.close()

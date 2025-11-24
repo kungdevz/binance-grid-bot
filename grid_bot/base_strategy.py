@@ -100,6 +100,9 @@ class BaseGridStrategy(IGridIO):
             level="INFO",
         )
 
+        # cache futures available (refreshed from DB)
+        self.futures_available_margin: float = 0.0
+
     # ------------------------------------------------------------------
     # Common Logic
     # ------------------------------------------------------------------
@@ -501,6 +504,7 @@ class BaseGridStrategy(IGridIO):
 
             try:
                 self._io_close_hedge(qty=hedge_qty, price=price, reason="RECENTER")
+                self._record_hedge_close(close_price=price, realized_pnl=hedge_pnl)
             except Exception as e:
                 self.logger.log(f"[HEDGE] close error during recenter: {e}", level="ERROR")
             self.hedge_position = None
@@ -642,6 +646,12 @@ class BaseGridStrategy(IGridIO):
         """
         ถ้าราคาลงมาชน grid และมีทุน → เปิด position
         """
+        # refresh available from DB (spot)
+        try:
+            self._refresh_balances_from_db()
+        except Exception as e:
+            self.logger.log(f"[BAL] refresh spot available error: {e}", level="ERROR")
+
         for level_price in self.grid_prices:
             filled = self.grid_filled.get(level_price, False)
 
@@ -890,6 +900,19 @@ class BaseGridStrategy(IGridIO):
         add_qty = net_spot_qty * add_ratio
         notional = add_qty * price / max(self.hedge_leverage, 1)
 
+        # refresh futures margin from DB
+        try:
+            self._refresh_balances_from_db()
+        except Exception as e:
+            self.logger.log(f"[BAL] refresh futures available error: {e}", level="ERROR")
+
+        if getattr(self, "futures_available_margin", 0.0) and notional > self.futures_available_margin:
+            self.logger.log(
+                f"[HEDGE] skip add hedge (notional {notional:.4f} > futures available {self.futures_available_margin:.4f})",
+                level="INFO",
+            )
+            return
+
         if notional < self.min_hedge_notional:
             # notional เล็กเกินไป ไม่คุ้มเปิด
             return
@@ -910,6 +933,7 @@ class BaseGridStrategy(IGridIO):
                 "entry": hedge_entry_price,
                 "timestamp": int(time.time() * 1000),
             }
+            self.hedge_position["order_id"] = self._record_hedge_open(qty=add_qty, price=hedge_entry_price)
         else:
             # ถ้าเดิมมี hedge อยู่ → เฉลี่ยต้นทุน
             old = self.hedge_position
@@ -917,6 +941,7 @@ class BaseGridStrategy(IGridIO):
             new_entry = (old["entry"] * old["qty"] + hedge_entry_price * add_qty) / new_qty
             self.hedge_position["qty"] = new_qty
             self.hedge_position["entry"] = new_entry
+            self.hedge_position["order_id"] = self._record_hedge_open(qty=add_qty, price=hedge_entry_price)
 
         self.logger.log(
             f"[HEDGE] scale-in {reason}: add_qty={add_qty:.4f}, " f"target_ratio={target_ratio:.2f}, " f"new_qty={self.hedge_position['qty']:.4f}, " f"entry={self.hedge_position['entry']:.4f}",
@@ -984,6 +1009,10 @@ class BaseGridStrategy(IGridIO):
             price=price,
             reason=reason,
         )
+        try:
+            self._record_hedge_close(close_price=price, realized_pnl=pnl)
+        except Exception as e:
+            self.logger.log(f"[HEDGE] record close error: {e}", level="ERROR")
 
         self.logger.log(
             f"[HEDGE] CLOSE reason={reason}, qty={qty:.4f}, entry={entry:.4f}, " f"close={price:.4f}, pnl={pnl:.4f}",
@@ -1038,6 +1067,67 @@ class BaseGridStrategy(IGridIO):
                 new_positions.append(p)
 
         self.positions = new_positions
+
+    # ------------------------------------------------------------------
+    # Hedge persistence + balance helpers
+    # ------------------------------------------------------------------
+    def _record_hedge_open(self, qty: float, price: float) -> Optional[int]:
+        """
+        Persist hedge open into FuturesOrders. Returns row id if created.
+        """
+        if not hasattr(self, "futures_db") or self.futures_db is None:
+            return None
+        try:
+            return self.futures_db.create_hedge_open(
+                symbol=self.symbol_future or self.symbol,
+                qty=qty,
+                price=price,
+                leverage=self.hedge_leverage,
+            )
+        except Exception as e:
+            self.logger.log(f"[HEDGE] create_hedge_open error: {e}", level="ERROR")
+            return None
+
+    def _record_hedge_close(self, close_price: float, realized_pnl: float) -> None:
+        if not hasattr(self, "futures_db") or self.futures_db is None:
+            return
+        order_id = None
+        try:
+            order_id = self.hedge_position.get("order_id") if self.hedge_position else None
+        except Exception:
+            order_id = None
+
+        if order_id:
+            try:
+                self.futures_db.close_hedge_order(
+                    order_id=order_id,
+                    close_price=close_price,
+                    realized_pnl=realized_pnl,
+                )
+                return
+            except Exception as e:
+                self.logger.log(f"[HEDGE] close_hedge_order error: {e}", level="ERROR")
+        # fallback: close by symbol
+        try:
+            self.futures_db.close_open_orders_by_group(symbol=self.symbol_future or self.symbol, reason="HEDGE_CLOSE")
+        except Exception as e:
+            self.logger.log(f"[HEDGE] close_open_orders_by_group error: {e}", level="ERROR")
+
+    def _refresh_balances_from_db(self) -> None:
+        """
+        Refresh spot/futures available from AccountBalance latest rows.
+        """
+        if not hasattr(self, "acc_balance_db") or self.acc_balance_db is None:
+            return
+        try:
+            spot_row = self.acc_balance_db.get_latest_balance_by_type("SPOT")
+            if spot_row:
+                self.available_capital = float(spot_row.get("end_balance_usdt", self.available_capital))
+            fut_row = self.acc_balance_db.get_latest_balance_by_type("FUTURES")
+            if fut_row:
+                self.futures_available_margin = float(fut_row.get("end_balance_usdt", self.futures_available_margin))
+        except Exception as e:
+            self.logger.log(f"[BAL] refresh error: {e}", level="ERROR")
 
     # ==================================================================
     #   HEDGE LOGIC (EMA + ZONE)
@@ -1269,8 +1359,7 @@ class BaseGridStrategy(IGridIO):
                 )
                 buffer -= loss_if_sell
                 self.logger.log(
-                    f"[REBAL] cut spot entry={p.entry_price:.4f}, qty={p.qty:.4f}, "
-                    f"loss={pos_unreal:.4f}, buffer_left={buffer:.4f}",
+                    f"[REBAL] cut spot entry={p.entry_price:.4f}, qty={p.qty:.4f}, " f"loss={pos_unreal:.4f}, buffer_left={buffer:.4f}",
                     level="INFO",
                 )
             except Exception as e:
