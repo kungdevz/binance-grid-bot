@@ -39,7 +39,7 @@ class LiveGridStrategy(BaseGridStrategy):
             logger=logger,
         )
 
-        self.exchange = ExchangeSync(symbol_spot=symbol_spot, symbol_future=symbol_future, mode="live")
+        self.exchange = ExchangeSync(symbol_spot=symbol_spot, symbol_future=symbol_future)
         self.logger.log("[LiveGridStrategy] initialized", level="INFO")
 
     # สามารถ sync order/position จาก exchange -> DB ตอนเริ่มต้นได้ที่นี่ถ้าต้องการ
@@ -99,6 +99,13 @@ class LiveGridStrategy(BaseGridStrategy):
             self.futures_db.close_hedge_order(order_id=resp.get("info", {}).get("orderId", 0), close_price=price, realized_pnl=pnl)
         except Exception as e:
             self.logger.log(f"[Live] close hedge error: {e}", level="ERROR")
+
+    def _run(self, *args, **kwargs) -> None:
+        """
+        Live loop should be driven by external candle/feed caller.
+        This stub keeps the class concrete for instantiation.
+        """
+        self.logger.log("[Live] _run is not implemented; feed candles via on_bar/on_candle", level="INFO")
 
     # Balance sync
     def sync_balances_to_db(self) -> None:

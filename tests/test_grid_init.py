@@ -1,16 +1,12 @@
 import unittest
 
-from grid_bot.strategy import Strategy as strategy
+from tests.fakes import FakeStrategy
 
 class TestGridInit(unittest.TestCase):
     
     def setUp(self):
         # Setup code before each test method
-        self.strategy = strategy(
-            symbol='None',
-            atr_period=14,
-            atr_mean_window=100        
-        )
+        self.strategy = FakeStrategy()
         self.spacing_size = 0.5
         self.grid_levels = 5
         self.center_price = 2000.0

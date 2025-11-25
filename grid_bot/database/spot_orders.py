@@ -9,6 +9,7 @@ class SpotOrders(BaseMySQLRepo):
     """
 
     def __init__(self) -> None:
+        super().__init__()
         try:
             conn = self._get_conn()
             cursor = conn.cursor()
@@ -161,11 +162,11 @@ class SpotOrders(BaseMySQLRepo):
         try: 
             if symbol:
                 cursor.execute(
-                    "SELECT * FROM spot_orders WHERE symbol = %s ORDER BY time",
+                    "SELECT * FROM spot_orders WHERE symbol = %s ORDER BY binance_time",
                     (symbol,),
                 )
             else:
-                cursor.execute("SELECT * FROM spot_orders ORDER BY time")
+                cursor.execute("SELECT * FROM spot_orders ORDER BY binance_time")
 
             rows = cursor.fetchall()
             columns = [col[0] for col in cursor.description]
@@ -208,7 +209,7 @@ class SpotOrders(BaseMySQLRepo):
                        updated_at = CURRENT_TIMESTAMP
                  WHERE symbol = %s
                    AND grid_id = %s
-                   AND status IN ('NEW', 'PARTIALLY_FILLED', 'OPEN')
+                   AND status IN ('NEW', 'PARTIALLY_FILLED')
                 """,
                 (symbol, grid_id),
             )

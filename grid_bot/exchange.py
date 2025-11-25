@@ -1,7 +1,8 @@
 from decimal import Decimal
-import ccxt, os
-from typing import Dict, List, Any
+import os
+from typing import Any, Dict, List
 from datetime import datetime, timezone
+import ccxt
 import grid_bot.utils.util as util
 
 
@@ -10,18 +11,27 @@ class ExchangeSync:
     Sync grid state and orders with exchange.
     """
 
-    def __init__(self, symbol_spot: str, symbol_future: str, test_net: bool = False):
-
+    def __init__(
+        self,
+        symbol_spot: str,
+        symbol_future: str,
+        test_net: bool = False,
+        load_markets: bool = True,
+        spot_client: Any = None,
+        futures_client: Any = None,
+        **_: Any,
+    ):
         self.symbol_spot = symbol_spot
         self.symbol_futures = symbol_future
-        self.spot = self.create_spot_exchanges(testnet=test_net)
-        self.futures = self.create_future_exchanges(testnet=test_net)
-        self.ensure_markets_loaded()
+        self.spot = spot_client or self.create_spot_exchanges(testnet=test_net)
+        self.futures = futures_client or self.create_future_exchanges(testnet=test_net)
+        if load_markets:
+            self.ensure_markets_loaded()
 
     def ensure_markets_loaded(self):
         if not self.spot.markets:
             self.spot.load_markets()
-        if not self.futures.market:
+        if not self.futures.markets:
             self.futures.load_markets()
 
     def create_spot_exchanges(self, testnet: bool = False):

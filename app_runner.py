@@ -12,15 +12,7 @@ async def main():
     logger = Logger()
     mode = os.getenv('MODE')
     spot_symbol = os.getenv('SYMBOL')
-    futures_symbol = os.getenv('FUTURES_SYMBOL') 
-
-    # bot = Strategy(
-    #     symbol=spot_symbol,
-    #     futures_symbol=futures_symbol,
-    #     atr_period=int(os.getenv('ATR_PERIOD')),
-    #     atr_mean_window=int(os.getenv('ATR_MEAN_WINDOW')),
-    #     mode=mode
-    # )
+    futures_symbol = os.getenv('FUTURES_SYMBOL')
 
     if mode == 'backtest':
         bt = BacktestGridStrategy(
@@ -38,12 +30,23 @@ async def main():
             raise ValueError('OHLCV_FILE must be set in env or config for backtest and point to an existing file')
         bt._run(file_path)
     else:
-        print('✅ Bot initialized for live mode')
+        lg = LiveGridStrategy(
+            symbol_spot=spot_symbol,
+            symbol_future=futures_symbol,
+            initial_capital=float(os.getenv('INITIAL_CAPITAL', 0) or 0),
+            grid_levels=int(os.getenv('GRID_LEVELS', 5)),
+            atr_multiplier=float(os.getenv('ATR_MULTIPLIER', 1.0)),
+            order_size_usdt=float(os.getenv('ORDER_SIZE_USDT', 10)),
+            reserve_ratio=float(os.getenv('RESERVE_RATIO', 0.3)),
+            logger=logger,
+        )
+        logger.log('✅ Bot initialized for live mode (feed candles via on_bar/on_candle)', level="INFO")
+        # Example websocket usage (not auto-started):
+        # ws_symbol = os.getenv("WS_SYMBOL", "").replace("/", "").lower()
+        # if ws_symbol:
+        #     uri = f"wss://stream.binance.com:9443/ws/{ws_symbol}@kline_{os.getenv('ws_timeframe', '1h')}"
+        #     await connect_and_listen(uri, lg)
     
-    # ws_symbol = os.getenv("WS_SYMBOL").replace("/", "").lower()
-    # uri = f"wss://stream.binance.com:9443/ws/{ws_symbol}@kline_{os.getenv("ws_timeframe")}"
-    # await connect_and_listen(uri, bot)
-
 async def connect_and_listen(uri, strat):
     """
     Connect to the WS URI, listen for messages, 

@@ -1,5 +1,6 @@
 import mysql.connector
-from typing import Dict, Any, Optional, List
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 from grid_bot.database.base_database import BaseMySQLRepo
 
@@ -81,7 +82,7 @@ class AccountBalance(BaseMySQLRepo):
         cursor = conn.cursor()
         try:
             cursor.execute(
-                "DELETE FROM account_balance WHERE id = ?",
+                "DELETE FROM account_balance WHERE id = %s",
                 (record_id,)
             )
             conn.commit()
@@ -98,7 +99,7 @@ class AccountBalance(BaseMySQLRepo):
         cursor = conn.cursor()
         try:
             cursor.execute(
-                "DELETE FROM account_balance WHERE record_date < ?",
+                "DELETE FROM account_balance WHERE record_date < %s",
                 (cutoff_date,)
             )
             conn.commit()

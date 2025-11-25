@@ -6,6 +6,7 @@ from grid_bot.database.base_database import BaseMySQLRepo
 class OhlcvData(BaseMySQLRepo):
 
     def __init__(self):
+        super().__init__()
         conn = self._get_conn()
         cursor = conn.cursor()
 
@@ -47,19 +48,32 @@ class OhlcvData(BaseMySQLRepo):
             cursor.close()
             conn.close()
 
-    def insert_ohlcv_data(self, symbol, timestamp, open, high, low, close, volume, tr, 
-                          atr_14, atr_28, ema_14, ema_28, ema_50, ema_100, ema_200) -> int:
+    def insert_ohlcv_data(self, *args, **kwargs) -> int:
+        """
+        Insert or upsert OHLCV row.
+        Accepts either positional/keyword args matching columns or a single dict.
+        """
+        cols = ["symbol", "timestamp", "open", "high", "low", "close", "volume", "tr", "atr_14", "atr_28", "ema_14", "ema_28", "ema_50", "ema_100", "ema_200"]
 
+        # dict input
+        if args and isinstance(args[0], dict):
+            data = {k: args[0].get(k) for k in cols}
+        else:
+            data = dict(zip(cols, args))
+            data.update(kwargs)
+
+        missing = [c for c in cols if c not in data]
+        if missing:
+            raise ValueError(f"Missing ohlcv fields: {missing}")
+
+        conn = self._get_conn()
+        cursor = conn.cursor()
         try:
-
-            conn = self._get_conn()
-            cursor = conn.cursor()
-
             insert_sql = """
                 INSERT INTO ohlcv_data(
                         symbol, timestamp, open, high, low, close, volume,
                         tr, atr_14, atr_28, ema_14, ema_28, ema_50, ema_100, ema_200
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, 
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s,
                           %s, %s, %s, %s, %s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE
                     open = VALUES(open),
@@ -77,16 +91,11 @@ class OhlcvData(BaseMySQLRepo):
                     ema_200 = VALUES(ema_200)
             """
 
-            cursor.execute(insert_sql, (
-                symbol, timestamp, open, high, low, close, volume,
-                tr, atr_14, atr_28,ema_14, ema_28, ema_50, ema_100, ema_200
-            ))
-
+            cursor.execute(insert_sql, tuple(data[c] for c in cols))
             conn.commit()
             return cursor.rowcount
-    
         finally:
-            cursor.close() 
+            cursor.close()
             conn.close()
 
     def delete_ohlcv_data(self, symbol: str, timestamp: int) -> int:
@@ -134,11 +143,11 @@ class OhlcvData(BaseMySQLRepo):
             cursor.close()
             conn.close()
     
-    def get_recent_ohlcv_by_timestamp(self, symbol: str, timestamp: int, limit: int) -> List[Dict[str, Any]]:
+    def get_recent_ohlcv_by_timestamp(self, symbol: str, timestamp: int, limit: int = 100) -> List[Dict[str, Any]]:
         conn = self._get_conn()
         cursor = conn.cursor()
         query = '''
-            SELECT symbol, timestamp, open_price, high_price, low_price, close_price, volume, 
+            SELECT symbol, timestamp, `open`, high, low, close, volume, 
                 tr, atr_14, atr_28, ema_14, ema_28, ema_50, ema_100, ema_200
             FROM ohlcv_data
             WHERE symbol = %s AND timestamp <= %s
@@ -147,8 +156,9 @@ class OhlcvData(BaseMySQLRepo):
         '''
         try:   
             cursor.execute(query, (symbol, timestamp, limit))
-            rows = cursor.fetchall()    
-            return rows
+            rows = cursor.fetchall()
+            columns = [col[0] for col in cursor.description]
+            return [dict(zip(columns, r)) for r in rows]
         finally:
             cursor.close()
             conn.close()

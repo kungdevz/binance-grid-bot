@@ -1,168 +1,36 @@
 import unittest
 from datetime import datetime
 
-from grid_bot.base_strategy import BaseGridStrategy
 from grid_bot.datas.position import Position
-
-
-class FakeLogger:
-    def log(self, msg, level="INFO"):
-        # Quiet logger for tests
-        return
-
-
-class FakeGridState:
-    def __init__(self):
-        self.rows = []
-
-    def save_state(self, entry: dict):
-        self.rows.append(entry)
-        return len(self.rows)
-
-    def deactivate_group(self, symbol: str, group_id: str, reason: str = "RECENTER"):
-        for r in self.rows:
-            if r.get("group_id") == group_id:
-                r["use_status"] = "N"
-        return 1
-
-    def close_open_orders_by_group(self, *args, **kwargs):
-        return 0
-
-    def load_state_with_use_flgs(self, symbol, use_flgs: str = "Y"):
-        return [r for r in self.rows if r.get("use_status") == use_flgs]
-
-
-class FakeSpotOrders:
-    def __init__(self):
-        self.rows = []
-
-    def close_open_orders_by_group(self, *args, **kwargs):
-        return 0
-
-    def create_order(self, data):
-        self.rows.append(data)
-        return len(self.rows)
-
-
-class FakeFuturesOrders:
-    def __init__(self):
-        self.rows = []
-
-    def create_hedge_open(self, symbol: str, qty: float, price: float, leverage: int, side: str = "SELL"):
-        row = {
-            "id": len(self.rows) + 1,
-            "order_id": len(self.rows) + 100,
-            "symbol": symbol,
-            "qty": qty,
-            "price": price,
-            "status": "OPEN",
-            "side": side,
-            "leverage": leverage,
-        }
-        self.rows.append(row)
-        return row["order_id"]
-
-    def close_hedge_order(self, order_id: int, close_price: float, realized_pnl: float):
-        for r in self.rows:
-            if r["order_id"] == order_id:
-                r["status"] = "CLOSED"
-                r["close_price"] = close_price
-                r["realized_pnl"] = realized_pnl
-                break
-
-    def close_open_orders_by_group(self, symbol: str, reason: str = "RECENTER"):
-        for r in self.rows:
-            if r["symbol"] == symbol and r.get("status") in ("OPEN", "NEW"):
-                r["status"] = "CANCELED"
-        return 0
-
-
-class FakeAccountBalance:
-    def __init__(self):
-        self.rows = []
-
-    def insert_balance_with_type(self, account_type: str, balance_usdt: float, available_usdt: float, notes: str = ""):
-        row = {
-            "record_date": datetime.now().strftime("%Y-%m-%d"),
-            "record_time": datetime.now().strftime("%H:%M:%S"),
-            "start_balance_usdt": balance_usdt,
-            "end_balance_usdt": available_usdt,
-            "notes": f"{account_type.upper()} {notes}".strip(),
-        }
-        self.rows.append(row)
-        return len(self.rows)
-
-    def get_latest_balance_by_type(self, account_type: str):
-        for r in reversed(self.rows):
-            if r["notes"].startswith(account_type.upper()):
-                return r
-        return None
-
-    def insert_balance(self, data):
-        self.rows.append(data)
-        return len(self.rows)
-
-
-class FakeStrategy(BaseGridStrategy):
-    """
-    Strategy stub that bypasses DB connections and uses fakes.
-    """
-    def __init__(self, mode="backtest"):
-        # do not call super().__init__ to avoid DB
-        self.symbol = "BTCUSDT"
-        self.symbol_future = "BTCUSDT"
-        self.mode = mode
-        self.initial_capital = 10000.0
-        self.reserve_ratio = 0.0
-        self.order_size_usdt = 100.0
-        self.total_capital = self.initial_capital
-        self.reserve_capital = 0.0
-        self.available_capital = self.initial_capital
-        self.grid_levels = 3
-        self.atr_multiplier = 1.0
-        self.grid_prices = []
-        self.grid_filled = {}
-        self.grid_group_id = "G1"
-        self.grid_spacing = 5.0
-        self.positions = []
-        self.realized_grid_profit = 0.0
-        self.prev_close = None
-        self.hedge_leverage = 2
-        self.hedge_size_ratio = 0.5
-        self.hedge_open_k_atr = 0.5
-        self.hedge_tp_ratio = 0.5
-        self.hedge_sl_ratio = 0.3
-        self.min_hedge_notional = 1.0
-        self.ema_fast_period = 14
-        self.ema_mid_period = 50
-        self.ema_slow_period = 200
-        self.drift_k = 2.5
-        self.vol_up_ratio = 1.5
-        self.vol_down_ratio = 0.7
-        # fakes
-        self.grid_db = FakeGridState()
-        self.spot_orders_db = FakeSpotOrders()
-        self.futures_db = FakeFuturesOrders()
-        self.acc_balance_db = FakeAccountBalance()
-        self.ohlcv_db = None
-        self.logger = FakeLogger()
-        self.hedge_position = None
-        self.futures_available_margin = 0.0
-
-    def _io_place_spot_buy(self, *args, **kwargs):
-        return {}
-
-    def _io_place_spot_sell(self, *args, **kwargs):
-        return {}
-
-    def _io_open_hedge_short(self, qty: float, price: float, reason: str):
-        return price
-
-    def _io_close_hedge(self, qty: float, price: float, reason: str):
-        return None
+from tests.fakes import FakeAccountBalance, FakeLogger, FakeStrategy
 
 
 class HedgeTests(unittest.TestCase):
+    def test_hedge_tp_threshold_based_on_spot_loss(self):
+        class SpyStrategy(FakeStrategy):
+            def __init__(self):
+                super().__init__(mode="backtest")
+                self.closed_reason = None
+                self.rebalanced = False
+            def _close_hedge(self, timestamp_ms: int, price: float, reason: str) -> None:
+                self.closed_reason = reason
+                self.hedge_position = None
+            def _rebalance_spot_after_hedge(self, timestamp_ms: int, hedge_pnl: float, price: float) -> None:
+                self.rebalanced = True
+
+        strat = SpyStrategy()
+        strat.hedge_tp_ratio = 1.0
+        strat.hedge_position = {"qty": 1.0, "entry": 100.0}
+        # spot losing 10, hedge pnl 8 -> below threshold -> no close
+        strat._manage_hedge_exit(timestamp_ms=0, price=92.0, spot_unrealized=-10.0, ema_fast=0, ema_mid=0)
+        self.assertIsNone(strat.closed_reason)
+
+        # hedge pnl 10 covers loss -> close with TP
+        strat.hedge_position = {"qty": 1.0, "entry": 100.0}
+        strat._manage_hedge_exit(timestamp_ms=0, price=90.0, spot_unrealized=-10.0, ema_fast=0, ema_mid=0)
+        self.assertEqual(strat.closed_reason, "TP")
+        self.assertTrue(strat.rebalanced)
+
     def test_backtest_hedge_persists_open_close(self):
         strat = FakeStrategy(mode="backtest")
         # add one spot position to allow net_spot_qty

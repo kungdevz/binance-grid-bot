@@ -7,6 +7,7 @@ class GridState(BaseMySQLRepo):
     """
 
     def __init__(self):
+        super().__init__()
         conn = self._get_conn()
         cursor = conn.cursor()
         # Create table without 'filled' column
@@ -108,8 +109,7 @@ class GridState(BaseMySQLRepo):
             cursor.execute(
                 """
                 UPDATE grid_state
-                   SET status      = 'close',
-                       update_date = CURRENT_TIMESTAMP
+                   SET update_date = CURRENT_TIMESTAMP
                  WHERE grid_price = %s
                 """,
                 (price,),
@@ -129,8 +129,7 @@ class GridState(BaseMySQLRepo):
             cursor.execute(
                 """
                 UPDATE grid_state
-                   SET status      = 'open',
-                       update_date = CURRENT_TIMESTAMP
+                   SET update_date = CURRENT_TIMESTAMP
                  WHERE grid_price = %s
                 """,
                 (price,),
@@ -149,9 +148,7 @@ class GridState(BaseMySQLRepo):
             cursor.execute(
                 """
                 UPDATE grid_state
-                   SET status      = 'cancelled',
-                       update_date = CURRENT_TIMESTAMP
-                 WHERE status = 'open'
+                   SET update_date = CURRENT_TIMESTAMP
                 """
             )
             conn.commit()

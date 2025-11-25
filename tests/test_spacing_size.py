@@ -3,20 +3,13 @@ import unittest
 import pandas as pd
 import numpy as np
 
-from grid_bot.database.logger import Logger
-from grid_bot.strategy import Strategy as strategy
-from grid_bot.database.grid_states import GridState as GridState
+from tests.fakes import FakeStrategy
 
 class TestSpacingSize(unittest.TestCase):
 
     def setUp(self):
-        self.strategy = strategy(
-            symbol='None',
-            futures_symbol='None',
-            atr_period=14,
-            atr_mean_window=100
-        )
-        self.define_spacing_size = strategy.define_spacing_size
+        self.strategy = FakeStrategy()
+        self.define_spacing_size = self.strategy.define_spacing_size
 
     def tearDown(self):
         self.strategy.acc_balance_db.delete_all_balances()

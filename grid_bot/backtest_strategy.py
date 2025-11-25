@@ -1,13 +1,12 @@
 # backtest_strategy.py
 from __future__ import annotations
-from time import timezone
 
-import pandas as pd
-import numpy as np
 import os
-
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
+
+import numpy as np
+import pandas as pd
 
 from grid_bot.database.logger import Logger
 from grid_bot.database.spot_orders import SpotOrders
@@ -129,8 +128,12 @@ class BacktestGridStrategy(BaseGridStrategy):
 
         return data
 
-    def _run(self, timestamp_ms):
-        file_path = os.getenv("OHLCV_FILE")
+    def _run(self, file_path: Optional[str] = None) -> None:
+        """
+        Execute a backtest over a CSV OHLCV file.
+        If file_path is None, fall back to env OHLCV_FILE.
+        """
+        file_path = file_path or os.getenv("OHLCV_FILE")
         if not file_path or not os.path.exists(file_path):
             raise ValueError("OHLCV_FILE must be set in env or config for backtest and point to an existing file")
 
@@ -184,7 +187,7 @@ class BacktestGridStrategy(BaseGridStrategy):
         """
         self.logger.log(f"[HEDGE_IO] close short stub qty={qty:.4f} @ {price:.4f}, reason={reason}", level="DEBUG")
         try:
-            resp = self._mock_futures_order(self.symbol_future, "SELL", price, qty, leverage=self.hedge_leverage)
+            resp = self._mock_futures_order(self.symbol_future, "BUY", price, qty, leverage=self.hedge_leverage)
             pnl = 0.0
             try:
                 info = resp.get("info", {})

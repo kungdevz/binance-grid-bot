@@ -10,6 +10,7 @@ class FuturesOrders(BaseMySQLRepo):
     CRUD operations for futures_orders table.
     """
     def __init__(self) -> None:
+        super().__init__()
         conn = self._get_conn()
         cursor = conn.cursor()
         # Create futures_orders table
@@ -65,7 +66,7 @@ class FuturesOrders(BaseMySQLRepo):
             """)
             
             if cursor.fetchone()[0] == 0:
-                cursor.execute("CREATE INDEX idx_futures_orders_time ON futures_orders(symbol)")
+                cursor.execute("CREATE INDEX idx_futures_orders_time ON futures_orders(time)")
             
             conn.commit()
 
@@ -178,7 +179,7 @@ class FuturesOrders(BaseMySQLRepo):
                        is_working = 0,
                        update_time = UNIX_TIMESTAMP() * 1000
                  WHERE symbol = %s
-                   AND status IN ('NEW', 'PARTIALLY_FILLED', 'OPEN')
+                   AND status IN ('NEW', 'PARTIALLY_FILLED')
                 """,
                 (symbol,),
             )
