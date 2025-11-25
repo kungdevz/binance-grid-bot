@@ -46,6 +46,47 @@ class HedgeTests(unittest.TestCase):
         self.assertEqual(strat.futures_db.rows[0]["status"], "CLOSED")
         self.assertIn("realized_pnl", strat.futures_db.rows[0])
 
+    def test_buy_skips_when_insufficient_capital(self):
+        strat = FakeStrategy()
+        strat.available_capital = 10.0
+        strat.grid_prices = [100.0]
+        strat.grid_filled = {100.0: False}
+        strat.order_size_usdt = 100.0
+        strat._process_buy_grid(timestamp_ms=0, price=100.0)
+        self.assertEqual(len(strat.spot_orders_db.rows), 0)
+        self.assertEqual(strat.available_capital, 10.0)
+
+    def test_hedge_not_opened_without_margin(self):
+        strat = FakeStrategy()
+        strat.futures_available_margin = 0.0
+        strat.positions = [Position(symbol="BTCUSDT", side="LONG", entry_price=100.0, qty=1.0, grid_price=95.0, target_price=105.0, opened_at=0, group_id="G1")]
+        strat._ensure_hedge_ratio(timestamp_ms=0, target_ratio=0.5, price=90.0, net_spot_qty=1.0, reason="NO_MARGIN")
+        self.assertIsNone(strat.hedge_position)
+
+    def test_hedge_closes_on_max_loss(self):
+        strat = FakeStrategy()
+        strat.positions = [Position(symbol="BTCUSDT", side="LONG", entry_price=100.0, qty=1.0, grid_price=95.0, target_price=105.0, opened_at=0, group_id="G1")]
+        strat.hedge_position = {"qty": 1.0, "entry": 80.0, "timestamp": 0}
+        strat._manage_hedge_exit(timestamp_ms=0, price=90.0, spot_unrealized=-10.0, ema_fast=0, ema_mid=0)
+        self.assertIsNone(strat.hedge_position)
+
+    def test_hedge_closes_on_reversal_after_hold(self):
+        class RevSpy(FakeStrategy):
+            def __init__(self):
+                super().__init__()
+                self.closed_reason = None
+            def _close_hedge(self, timestamp_ms: int, price: float, reason: str) -> None:
+                self.closed_reason = reason
+                self.hedge_position = None
+
+        strat = RevSpy()
+        strat.hedge_min_hold_ms = 0
+        strat.positions = [Position(symbol="BTCUSDT", side="LONG", entry_price=100.0, qty=1.0, grid_price=95.0, target_price=105.0, opened_at=0, group_id="G1")]
+        strat.hedge_position = {"qty": 1.0, "entry": 100.0, "timestamp": 0}
+        strat._manage_hedge_exit(timestamp_ms=1000, price=105.0, spot_unrealized=5.0, ema_fast=104.0, ema_mid=103.0)
+        self.assertIsNone(strat.hedge_position)
+        self.assertEqual(strat.closed_reason, "REVERSAL_CUT")
+
     def test_recenter_skips_when_hedge_pnl_negative(self):
         strat = FakeStrategy()
         strat.grid_prices = [80.0, 85.0, 90.0]
@@ -109,6 +150,18 @@ class HedgeTests(unittest.TestCase):
         notes = [r["notes"] for r in live.acc_balance_db.rows]
         self.assertTrue(any(n.startswith("SPOT") for n in notes))
         self.assertTrue(any(n.startswith("FUTURES") for n in notes))
+
+    def test_records_account_balance_on_hedge_open_close(self):
+        strat = FakeStrategy()
+        strat.positions = [
+            Position(symbol="BTCUSDT", side="LONG", entry_price=100.0, qty=1.0, grid_price=95.0, target_price=105.0, opened_at=0, group_id="G1")
+        ]
+        strat._ensure_hedge_ratio(target_ratio=0.5, price=90.0, net_spot_qty=1.0, reason="TEST_OPEN")
+        self.assertTrue(any(r.get("notes") == "hedge_open" for r in strat.acc_balance_db.rows))
+        # close hedge and ensure snapshot recorded
+        strat.hedge_position = {"qty": 0.5, "entry": 90.0, "order_id": strat.futures_db.rows[0]["order_id"]}
+        strat._close_hedge(timestamp_ms=2000, price=85.0, reason="TEST_CLOSE")
+        self.assertTrue(any(r.get("notes") == "hedge_close" for r in strat.acc_balance_db.rows))
 
 
 if __name__ == "__main__":

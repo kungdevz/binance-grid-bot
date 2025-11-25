@@ -7,15 +7,22 @@ from typing import Literal
 _sequence_lock = threading.Lock()
 _sequence = 0
 
-OrderAction = Literal['BUY', 'SELL', 'HEDGE_OPEN', 'HEDGE_CLOSE']
+OrderAction = Literal["BUY", "SELL", "HEDGE_OPEN", "HEDGE_CLOSE"]
+
 
 def to_exchange_amount(amount_dec: Decimal, precision: int) -> float:
     step = Decimal("1").scaleb(-precision)  # 10^-precision
     return float(amount_dec.quantize(step, rounding=ROUND_DOWN))
 
+
 def to_exchange_price(price_dec: Decimal, precision: int) -> float:
     step = Decimal("1").scaleb(-precision)
     return float(price_dec.quantize(step, rounding=ROUND_DOWN))
+
+
+def timemstamp_ms_to_date(timestamp_ms: int) -> str:
+    return datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
 
 def generate_order_id(action: OrderAction) -> str:
     """
@@ -29,7 +36,7 @@ def generate_order_id(action: OrderAction) -> str:
     """
     global _sequence
     # Validate action
-    allowed = {'BUY', 'SELL', 'HEDGE_OPEN', 'HEDGE_CLOSE', 'INIT'}
+    allowed = {"BUY", "SELL", "HEDGE_OPEN", "HEDGE_CLOSE", "INIT"}
     if action not in allowed:
         raise ValueError(f"Invalid action '{action}'. Must be one of {allowed}.")
 

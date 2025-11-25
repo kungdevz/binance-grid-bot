@@ -160,6 +160,7 @@ class FakeStrategy(BaseGridStrategy):
         self.grid_filled = {}
         self.grid_group_id = "G1"
         self.grid_spacing = 5.0
+        self.spot_fee_rate = 0.001
         self.positions: List[Position] = []
         self.realized_grid_profit = 0.0
         self.prev_close = None
@@ -183,7 +184,7 @@ class FakeStrategy(BaseGridStrategy):
         self.ohlcv_db: Optional[FakeOhlcvData] = FakeOhlcvData()
         self.logger = FakeLogger()
         self.hedge_position = None
-        self.futures_available_margin = 0.0
+        self.futures_available_margin = 10000.0
 
     # implement abstract I/O
     def _io_place_spot_buy(self, *args, **kwargs):
@@ -192,10 +193,10 @@ class FakeStrategy(BaseGridStrategy):
     def _io_place_spot_sell(self, *args, **kwargs):
         return {}
 
-    def _io_open_hedge_short(self, qty: float, price: float, reason: str):
+    def _io_open_hedge_short(self, timestamp_ms: int, qty: float, price: float, reason: str):
         return price
 
-    def _io_close_hedge(self, qty: float, price: float, reason: str):
+    def _io_close_hedge(self, timestamp_ms: int, qty: float, price: float, reason: str):
         return None
 
     def _run(self, timestamp_ms: int) -> None:
@@ -206,5 +207,5 @@ class FakeStrategy(BaseGridStrategy):
     def initialize_grid(self, symbol: str, base_price: float, spacing: float, levels: int):
         self.grid_levels = levels
         self.symbol = symbol
-        self._init_lower_grid(base_price=base_price, atr=spacing, spacing_override=spacing)
+        self._init_lower_grid(timestamp_ms=0, base_price=base_price, atr=spacing, spacing_override=spacing)
         return self.grid_group_id

@@ -166,14 +166,17 @@ class BacktestGridStrategy(BaseGridStrategy):
             )
         return None
 
-    def _io_open_hedge_short(self, qty: float, price: float, reason: str) -> Optional[float]:
+    def _io_open_hedge_short(self, timestamp_ms: int, qty: float, price: float, reason: str) -> Optional[float]:
         """
         เปิด short futures จริง (live) หรือ mock (backtest)
         return: entry_price ถ้าสำเร็จ, None ถ้า fail
         """
-        self.logger.log(f"[HEDGE_IO] open short backtest_strategy qty={qty:.4f} @ {price:.4f}, reason={reason}", level="DEBUG")
+        self.logger.log(
+            f"Date: {datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} - [HEDGE_IO] open short backtest_strategy qty={qty:.4f} @ {price:.4f}, reason={reason}",
+            level="INFO",
+        )
         try:
-            resp = self._mock_futures_order(self.symbol_future, "SELL", price, qty, leverage=self.hedge_leverage)
+            resp = self._mock_futures_order(self.symbol_future, "BUY", price, qty, leverage=self.hedge_leverage)
             avg_price = float(resp.get("info", {}).get("price", price)) if isinstance(resp, dict) else price
             self.futures_db.create_hedge_open(symbol=self.symbol_future, qty=qty, price=avg_price, leverage=self.hedge_leverage)
             return avg_price
@@ -181,13 +184,16 @@ class BacktestGridStrategy(BaseGridStrategy):
             self.logger.log(f"[Live] open hedge error: {e}", level="ERROR")
         return price
 
-    def _io_close_hedge(self, qty: float, price: float, reason: str) -> None:
+    def _io_close_hedge(self, timestamp_ms: int, qty: float, price: float, reason: str) -> None:
         """
         ปิด short futures จริง (live) หรือ mock (backtest)
         """
-        self.logger.log(f"[HEDGE_IO] close short stub qty={qty:.4f} @ {price:.4f}, reason={reason}", level="DEBUG")
+        self.logger.log(
+            f"Date: {datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} - [HEDGE_IO] close backtest_strategy stub qty={qty:.4f} @ {price:.4f}, reason={reason}",
+            level="INFO",
+        )
         try:
-            resp = self._mock_futures_order(self.symbol_future, "BUY", price, qty, leverage=self.hedge_leverage)
+            resp = self._mock_futures_order(self.symbol_future, "SELL", price, qty, leverage=self.hedge_leverage)
             pnl = 0.0
             try:
                 info = resp.get("info", {})

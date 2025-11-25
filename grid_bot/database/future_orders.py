@@ -9,6 +9,7 @@ class FuturesOrders(BaseMySQLRepo):
     """
     CRUD operations for futures_orders table.
     """
+
     def __init__(self) -> None:
         super().__init__()
         conn = self._get_conn()
@@ -48,42 +49,66 @@ class FuturesOrders(BaseMySQLRepo):
                 """
             )
 
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT COUNT(1) FROM INFORMATION_SCHEMA.STATISTICS
                 WHERE TABLE_SCHEMA = DATABASE()
                 AND TABLE_NAME = 'futures_orders'
                 AND INDEX_NAME = 'idx_futures_orders_symbol';
-            """)
+            """
+            )
 
             if cursor.fetchone()[0] == 0:
                 cursor.execute("CREATE INDEX idx_futures_orders_symbol ON futures_orders(symbol)")
 
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT COUNT(1) FROM INFORMATION_SCHEMA.STATISTICS
                 WHERE TABLE_SCHEMA = DATABASE()
                 AND TABLE_NAME = 'futures_orders'
                 AND INDEX_NAME = 'idx_futures_orders_time';
-            """)
-            
+            """
+            )
+
             if cursor.fetchone()[0] == 0:
                 cursor.execute("CREATE INDEX idx_futures_orders_time ON futures_orders(time)")
-            
+
             conn.commit()
 
         finally:
             cursor.close()
             conn.close()
 
-    def create_order(self, data: Dict[str, Any]) -> int:
+    def create_order(self, data: Dict[str, Any]) -> str:
         """
         Insert a new futures order. Returns the internal row id.
         """
         cols = [
-            "order_id", "client_order_id", "symbol", "status", "type", "side",
-            "price", "avg_price", "orig_qty", "executed_qty", "cum_quote",
-            "time_in_force", "stop_price", "iceberg_qty", "time", "update_time", "is_working",
-            "position_side", "reduce_only", "close_position", "working_type",
-            "price_protect", "orig_type", "margin_asset", "leverage"
+            "order_id",
+            "client_order_id",
+            "symbol",
+            "status",
+            "type",
+            "side",
+            "price",
+            "avg_price",
+            "orig_qty",
+            "executed_qty",
+            "cum_quote",
+            "time_in_force",
+            "stop_price",
+            "iceberg_qty",
+            "time",
+            "update_time",
+            "is_working",
+            "position_side",
+            "reduce_only",
+            "close_position",
+            "working_type",
+            "price_protect",
+            "orig_type",
+            "margin_asset",
+            "leverage",
         ]
         placeholders = ", ".join("%s" for _ in cols)
         values = [data.get(col) for col in cols]
@@ -95,9 +120,8 @@ class FuturesOrders(BaseMySQLRepo):
                 f"INSERT INTO futures_orders ({', '.join(cols)}) VALUES ({placeholders})",
                 values,
             )
-            row_id = cursor.lastrowid
             conn.commit()
-            return row_id
+            return data.get("order_id")
         finally:
             cursor.close()
             conn.close()
@@ -107,9 +131,7 @@ class FuturesOrders(BaseMySQLRepo):
         conn = self._get_conn()
         cursor = conn.cursor(dictionary=True)
         try:
-            cursor.execute(
-                "SELECT * FROM futures_orders WHERE order_id = %s", (order_id,)
-            )
+            cursor.execute("SELECT * FROM futures_orders WHERE order_id = %s", (order_id,))
             row = cursor.fetchone()
             return row
         finally:
@@ -122,9 +144,7 @@ class FuturesOrders(BaseMySQLRepo):
         cursor = conn.cursor(dictionary=True)
         try:
             if symbol:
-                cursor.execute(
-                    "SELECT * FROM futures_orders WHERE symbol = %s ORDER BY time", (symbol,)
-                )
+                cursor.execute("SELECT * FROM futures_orders WHERE symbol = %s ORDER BY time", (symbol,))
             else:
                 cursor.execute("SELECT * FROM futures_orders ORDER BY time")
             rows = cursor.fetchall()
@@ -143,9 +163,7 @@ class FuturesOrders(BaseMySQLRepo):
         conn = self._get_conn()
         cursor = conn.cursor()
         try:
-            cursor.execute(
-                f"UPDATE futures_orders SET {set_clause} WHERE order_id = %s", values
-            )
+            cursor.execute(f"UPDATE futures_orders SET {set_clause} WHERE order_id = %s", values)
             conn.commit()
         finally:
             cursor.close()
@@ -156,9 +174,7 @@ class FuturesOrders(BaseMySQLRepo):
         conn = self._get_conn()
         cursor = conn.cursor()
         try:
-            cursor.execute(
-                "DELETE FROM futures_orders WHERE order_id = %s", (order_id,)
-            )
+            cursor.execute("DELETE FROM futures_orders WHERE order_id = %s", (order_id,))
             conn.commit()
         finally:
             cursor.close()

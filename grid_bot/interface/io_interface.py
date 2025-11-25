@@ -14,13 +14,7 @@ class IGridIO(ABC):
     """
 
     @abstractmethod
-    def _io_place_spot_buy(
-        self,
-        timestamp_ms: int,
-        price: float,
-        qty: float,
-        grid_id: str,
-    ) -> Dict[str, Any]:
+    def _io_place_spot_buy(self, timestamp_ms: int, price: float, qty: float, grid_id: str) -> Dict[str, Any]:
         """
         ให้ subclass live/backtest ไป implement:
         - live: เรียก ExchangeSync.place_limit_buy + เขียน DB
@@ -30,12 +24,7 @@ class IGridIO(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def _io_place_spot_sell(
-        self,
-        timestamp_ms: int,
-        position: Position,
-        sell_price: float,
-    ) -> Dict[str, Any]:
+    def _io_place_spot_sell(self, timestamp_ms: int, position: Position, sell_price: float) -> Dict[str, Any]:
         """
         ให้ subclass ไป implement:
         - live: ยิง sell ไปที่ exchange (limit/market แล้วแต่ design)
@@ -44,7 +33,7 @@ class IGridIO(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def _io_open_hedge_short(self, qty: float, price: float, reason: str) -> Optional[float]:
+    def _io_open_hedge_short(self, timestamp_ms: int, qty: float, price: float, reason: str) -> Optional[float]:
         """
         เปิด short futures จริง (live) หรือ mock (backtest)
         return: entry_price ถ้าสำเร็จ, None ถ้า fail
@@ -52,7 +41,7 @@ class IGridIO(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def _io_close_hedge(self, qty: float, price: float, reason: str) -> None:
+    def _io_close_hedge(self, timestamp_ms: int, qty: float, price: float, reason: str) -> None:
         """
         ปิด short futures จริง (live) หรือ mock (backtest)
         """

@@ -1,86 +1,225 @@
-# Grid Bot : ATR + Hedge Short
+# Grid Bot – ATR-Based Lower-Only Grid + Futures Hedge (USDT-Only)
 
-## สรุปหลัก: **USDT-Only Grid Bot + ATR + Hedge ( Neutral Short )**
+## 1. Overview
 
-### 🎯 เป้าหมาย
+This bot is designed as a **USDT-only spot grid trading system** enhanced with a **short-futures hedge** and **ATR-based dynamic spacing**:
 
-- ใช้ USDT เป็นทุนหลัก สร้างรายได้แบบ Passive ( Cash Flow )
-- ซื้อสินทรัพย์ ที่ราคาลดลงตามกรอบ Grid แบบ Dynamic
-- ป้องกันการ Drawdown รุนแรงด้วยการ Hedge (Short Futures)
-- ปรับ Grid ตามความผันผวนของตลาด (ATR)
-- ไม่มีการถือสินทรัพย์ระยะยาว (ถือเมื่อมี order เท่านั้น)
-
----
-
-## 🧠 หลักการทำงาน
-
-| ส่วน | รายละเอียด |
-| --- | --- |
-| 🔁 **Grid Strategy** | วางกรอบซื้อ (Buy only) ตามราคา ลดระดับลงเรื่อย ๆ |
-| 📊 **ATR-Based Spacing** | ระยะห่างของ Grid (`spacing`) คำนวณจาก `ATR × multiplier` |
-| 🔐 **Hedge Strategy** | เปิด Short Futures เมื่อราคามีแนวโน้มจะหลุด Lowest Grid. |
-| 💡 **Close Hedge** | ปิด Hedge  ( PNL ต้องไม่ติดลบ ปิด Grid Order ขาย SPOT ที่มีทั้งหมด โดยเน้นรักษาต้นทุน นำกำไรจาก Short มาเฉลี่ย |
-| 💾 **State** | เก็บคำสั่ง Buy ใน SQLite (หรือ sync จาก Binance หาก live) |
+- Capital is **100% USDT** — no long-term coin holding; spot positions exist only when opened by grid orders.  
+- Uses **lower-only grid**: places BUY orders as price declines through predefined levels.  
+- Grid spacing adapts dynamically based on **ATR(14/28)** to match market volatility.  
+- When price breaks below the lowest grid → automatically opens **futures short hedge** to offset spot drawdown.  
+- Hedge profit is used to **rebalance and reduce spot losses**.  
+- Supports **Backtest / Forward Test** using simulation, and **Live Trading** via Binance Spot/Futures (ccxt).
 
 ---
 
-## 🔄 Work Flow
+## 2. Architecture
 
+### 2.1 Strategy Layer
+
+#### `BaseGridStrategy`
+Core engine containing:
+
+- Indicator engine: TR, ATR14, ATR28, EMA14/28/50/100/200  
+- Grid management: initialize, recalc spacing, recenter grid  
+- Spot trading workflow: BUY/SELL with profit target = entry + spacing  
+- Hedge system: open/scale/close short positions, rebalance spot holdings  
+- Writes OHLCV data and snapshots to DB (backtest).
+
+#### `BacktestGridStrategy`
+- Simulates spot and futures trades.  
+- Writes simulated orders to DB.  
+- Reads a CSV file: `Time,Open,High,Low,Close,Volume`.
+
+#### `LiveGridStrategy`
+- Executes real trades via `ExchangeSync`.  
+- Syncs spot/futures balances into DB.  
+- Converts Binance response into internal DB schema.
+
+---
+
+### 2.2 I/O Layer — `IGridIO`
+
+Defines abstract methods:
+
+- `_io_place_spot_buy(...)`  
+- `_io_place_spot_sell(...)`  
+- `_io_open_hedge_short(...)`  
+- `_io_close_hedge(...)`  
+- `_run(...)`
+
+Concrete classes implement them for backtest or live.
+
+---
+
+### 2.3 Exchange Layer — `ExchangeSync`
+
+- Spot: limit buy/sell  
+- Futures: open/close shorts  
+- Fetch spot/futures balances  
+- Sync open orders with DB  
+- Supports Binance testnet and demo via environment variables
+
+---
+
+### 2.4 Database Layer (MySQL)
+
+All repos inherit from `BaseMySQLRepo`:
+
+| Repository | Table | Purpose |
+|-----------|--------|---------|
+| `GridState` | `grid_state` | Active grid levels and spacing |
+| `OhlcvData` | `ohlcv_data` | OHLCV + indicator storage |
+| `SpotOrders` | `spot_orders` | Spot trade history |
+| `FuturesOrders` | `futures_orders` | Hedge orders & PnL |
+| `AccountBalance` | `account_balance` | Equity snapshots |
+| `Logger` | `logs` | Application logging |
+
+Schema is created automatically.
+
+---
+
+## 3. Core Strategy Workflow
+
+### Step 1 — Update Indicators  
+- Compute ATR/EMA  
+- Insert OHLCV row
+
+### Step 2 — Load Grid  
+- Load active grid from DB if not loaded
+
+### Step 3 — Initialize / Adjust / Recenter  
+- Initialize grid on first run  
+- Adjust spacing dynamically  
+- Recenter grid when price drifts or grid nearly consumed
+
+### Step 4 — BUY Logic  
+BUY spot when price hits lower grid:
+
+- Record position  
+- Set sell target = entry + spacing  
+- Deduct capital  
+- Snapshot balance (backtest)
+
+### Step 5 — SELL Logic  
+SELL spot when price ≥ target:
+
+- Realize profit  
+- Add capital  
+- Persist order record
+
+### Step 6 — Hedge Logic  
+Triggered when price breaks lowest grid:
+
+- Open/scale hedge short  
+- Close hedge on PnL or EMA/ATR reversal  
+- Use hedge profit to reduce spot bag
+
+---
+
+## 4. Modes & Runner
+
+### `app_runner.py`
+Selects mode via environment:
+
+| MODE | Description |
+|------|-------------|
+| `backtest` | Run simulation with OHLCV CSV |
+| other | Live trading mode |
+
+Includes a Binance WebSocket example to feed closed candles to strategy.
+
+---
+
+## 5. Environment Variables
+
+### DB
 ```
-START (check configuration in .env (forward test or live)
-│
-├─> Initialize parameters, reserve ratio and grid levels is from .env then get captical
-|   ├─> forward test mode, Get a capital it from .env file
-|   ├─> Live mode, Get a capital (Account balance) from exchange
-│
-├─> Run in live mode, Connect exchanges (spot, futures) using API keys
-|   ├─> Get Spot fee
-|   ├─> Get Future fee
-|   |─> Check Balance in account then update to 
-|   |─> Check current spot postion (open and fill) then update status to spot_orders table (spot_orders.py)
-|   └─> Check current future postion at Exchange then update status (Open and filled) to futures_orders table (futures_orders.py)
-├─> Run in forward test mode all value in .env file.
-|   ├─> Get Spot fee (.env file)
-|   ├─> Get Future fee (.env file)
-|   ├─> Check Balance in account (account_balance.py)
-|   └─> Check current future postion (open and fill) then update status to futures_orders table (futures_orders.py)
-│
-├─> Fetch historical candles, forward test read from OHCLV file, live connect to exchange (last 30 Days).
-│     ├─> Calculate TR and ATR(14)
-│     ├─> Calculate multiplier from TR and ATR
-│     ├─> Calculate initial grid spacing: ATR * multiplier
-│     └─> Create initial grid prices (above & below base price)
-│
-├─> Place initial limit orders (simulate if forward test, real if live) 
-│
-├─> Start real-time price stream (websocket)
-│
-├─> LOOP: On new candle
-│     ├─> Update ATR, ATR
-│     ├─> Check if grid needs to adjust spacing (optional dynamic adjust)
-│     ├─> Process buys:
-│     │     ├─> If price <= grid level and not yet filled
-│     │     │     ├─> Execute buy
-│     │     │     ├─> Allocate USDT
-│     │     │     └─> Update grid state, mark as filled
-│     │     └─> Update positions
-│     │
-│     ├─> Process sells:
-│     │     ├─> If price >= target price
-│     │     │     ├─> Execute sell
-│     │     │     ├─> Return USDT
-│     │     │     ├─> Add realized profit
-│     │     │     └─> Update grid state, mark as unfilled
-│     │
-│     ├─> Hedge logic:
-│     │     ├─> If price < lowest grid - ATR and not hedged
-│     │     │     ├─> Open short (hedge), size = % of spot position
-│     │     │     └─> Mark hedge active
-│     │     ├─> If price > hedge entry + ATR and hedge active
-│     │     │     ├─> Close short (hedge)
-│     │     │     └─> Add realized hedge profit
-│     │
-│     └─> Save updated state to DB (SQLite)
-│
-└─> END LOOP (runs until stopped)
+DB_HOST
+DB_USER
+DB_PASSWORD
+DB_NAME
+DB_PORT
+DB_POOL_SIZE
 ```
+
+### Binance Keys
+Spot:
+```
+API_SPOT_KEY
+API_SPOT_SECRET
+API_SPOT_KEY_TEST
+API_SPOT_SECRET_TEST
+```
+
+Futures:
+```
+API_FUTURE_KEY
+API_FUTURE_SECRET
+API_TEST_KEY_FUTURE
+API_TEST_SECRET_FUTURE
+```
+
+### Strategy
+```
+INITIAL_CAPITAL
+GRID_LEVELS
+ATR_MULTIPLIER
+ORDER_SIZE_USDT
+RESERVE_RATIO
+SYMBOL
+FUTURES_SYMBOL
+OHLCV_FILE
+```
+
+### Logging
+```
+ENVIRONMENT = development | production
+```
+
+---
+
+## 6. How to Run
+
+### Install
+```bash
+pip install ccxt mysql-connector-python pandas numpy websockets python-dotenv
+```
+
+### Backtest Example
+```bash
+export MODE=backtest
+export SYMBOL="BNB/USDT"
+export FUTURES_SYMBOL="BNB/USDT"
+export OHLCV_FILE="/mnt/data/ohlcv.csv"
+python app_runner.py
+```
+
+### Live Example
+```bash
+export MODE=live
+export SYMBOL="BNB/USDT"
+export FUTURES_SYMBOL="BNB/USDT"
+export INITIAL_CAPITAL=1000
+python app_runner.py
+```
+
+---
+
+## 7. File Structure
+
+| File | Purpose |
+|------|---------|
+| `base_strategy.py` | Core grid & hedge engine |
+| `backtest_strategy.py` | Backtest runner |
+| `live_strategy.py` | Live trading |
+| `exchange.py` | ccxt wrapper |
+| `io_interface.py` | Abstract I/O |
+| `app_runner.py` | Entry point + WS example |
+| `grid_states.py` | Grid DB repo |
+| `ohlcv_data.py` | OHLCV DB repo |
+| `spot_orders.py` | Spot DB repo |
+| `future_orders.py` | Futures/hedge DB repo |
+| `account_balance.py` | Balance snapshots |
+| `logger.py` | Logging to DB |
+| `base_database.py` | MySQL pool |

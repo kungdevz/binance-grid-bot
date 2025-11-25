@@ -1,6 +1,7 @@
 # live_strategy.py
 from __future__ import annotations
 from typing import Any, Dict, Optional
+from datetime import datetime, timezone
 
 from grid_bot.exchange import ExchangeSync
 from grid_bot.database.logger import Logger
@@ -54,7 +55,7 @@ class LiveGridStrategy(BaseGridStrategy):
         resp = self.exchange.place_limit_buy(self.symbol, price, qty, exchange=True)
 
         # แปลง response เป็นรูปแบบเดียวกับ SpotOrders
-        order_data = self.exchange._build_spot_order_data(resp, grid_id)
+        order_data = self._build_spot_order_data(resp, grid_id)
         try:
             self.spot_orders_db.create_order(order_data)
         except Exception as e:
@@ -66,7 +67,7 @@ class LiveGridStrategy(BaseGridStrategy):
 
         qty = position.qty
         resp = self.exchange.place_limit_sell(self.symbol, sell_price, qty, exchange=True)
-        order_data = self.exchange._build_spot_order_data(resp, position.group_id)
+        order_data = self._build_spot_order_data(resp, position.group_id)
 
         try:
             self.spot_orders_db.create_order(order_data)
@@ -75,7 +76,7 @@ class LiveGridStrategy(BaseGridStrategy):
 
         return order_data
 
-    def _io_open_hedge_short(self, qty: float, price: float, reason: str) -> Optional[float]:
+    def _io_open_hedge_short(self, timestamp_ms: int, qty: float, price: float, reason: str) -> Optional[float]:
         self.logger.log(f"[HEDGE_IO] open short live_strategy qty={qty:.4f} @ {price:.4f}, reason={reason}", level="DEBUG")
         try:
             resp = self.exchange.place_futures_short(self.symbol_future, price, qty, leverage=self.hedge_leverage, exchange=True)
@@ -86,7 +87,7 @@ class LiveGridStrategy(BaseGridStrategy):
             self.logger.log(f"[Live] open hedge error: {e}", level="ERROR")
             return None
 
-    def _io_close_hedge(self, qty: float, price: float, reason: str) -> None:
+    def _io_close_hedge(self, timestamp_ms: int, qty: float, price: float, reason: str) -> None:
         try:
             resp = self.exchange.close_futures_position(self.symbol_future, qty=qty, price=price, exchange=True)
             pnl = 0.0
@@ -126,3 +127,43 @@ class LiveGridStrategy(BaseGridStrategy):
             self.acc_balance_db.insert_balance_with_type("FUTURES", balance_usdt=total_wallet, available_usdt=available, notes="LIVE")
         except Exception as e:
             self.logger.log(f"[BAL] sync futures error: {e}", level="ERROR")
+
+    def record_hedge_balance(self, timestamp_ms: int, current_price: float, notes: str) -> None:
+        """
+        Fetch live balances and persist combined snapshot during hedge events.
+        """
+        if not hasattr(self, "acc_balance_db") or self.acc_balance_db is None:
+            return
+
+        dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+        spot_total = 0.0
+        futures_total = 0.0
+        try:
+            spot_bal = self.exchange.fetch_spot_balance()
+            usdt_spot = spot_bal.get("USDT", {}) if isinstance(spot_bal, dict) else {}
+            spot_total = float(usdt_spot.get("total", 0.0))
+        except Exception as e:
+            self.logger.log(f"[HEDGE] fetch spot balance error: {e}", level="ERROR")
+        try:
+            fut_bal = self.exchange.fetch_futures_balance()
+            info = fut_bal.get("info", {}) if isinstance(fut_bal, dict) else {}
+            futures_total = float(info.get("totalWalletBalance", 0.0) or fut_bal.get("total", 0.0))
+        except Exception as e:
+            self.logger.log(f"[HEDGE] fetch futures balance error: {e}", level="ERROR")
+
+        equity = spot_total + futures_total
+        data = {
+            "record_date": dt.strftime("%Y-%m-%d"),
+            "record_time": dt.strftime("%H:%M:%S"),
+            "start_balance_usdt": round(equity, 6),
+            "net_flow_usdt": 0.0,
+            "realized_pnl_usdt": 0.0,
+            "unrealized_pnl_usdt": 0.0,
+            "fees_usdt": 0.0,
+            "end_balance_usdt": round(equity, 6),
+            "notes": notes,
+        }
+        try:
+            self.acc_balance_db.insert_balance(data)
+        except Exception as e:
+            self.logger.log(f"[AccountBalance] record_hedge_balance error: {e}", level="ERROR")
