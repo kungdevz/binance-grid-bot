@@ -84,8 +84,10 @@ class FakeAccountBalance:
     def __init__(self):
         self.rows: List[Dict[str, Any]] = []
 
-    def insert_balance_with_type(self, account_type: str, balance_usdt: float, available_usdt: float, notes: str = ""):
+    def insert_balance_with_type(self, account_type: str, symbol: str = "", balance_usdt: float = 0.0, available_usdt: float = 0.0, notes: str = ""):
         row = {
+            "account_type": account_type.upper(),
+            "symbol": symbol,
             "record_date": datetime.now().strftime("%Y-%m-%d"),
             "record_time": datetime.now().strftime("%H:%M:%S"),
             "start_balance_usdt": balance_usdt,
@@ -95,9 +97,9 @@ class FakeAccountBalance:
         self.rows.append(row)
         return len(self.rows)
 
-    def get_latest_balance_by_type(self, account_type: str):
+    def get_latest_balance_by_type(self, account_type: str, symbol: str = ""):
         for r in reversed(self.rows):
-            if r["notes"].startswith(account_type.upper()):
+            if r.get("account_type", "").startswith(account_type.upper()):
                 return r
         return None
 

@@ -115,7 +115,8 @@ class LiveGridStrategy(BaseGridStrategy):
             usdt_spot = spot_bal.get("USDT", {}) if isinstance(spot_bal, dict) else {}
             spot_total = float(usdt_spot.get("total", 0.0))
             spot_free = float(usdt_spot.get("free", spot_total))
-            self.acc_balance_db.insert_balance_with_type("SPOT", balance_usdt=spot_total, available_usdt=spot_free, notes="LIVE")
+            self.available_capital = spot_free
+            self.acc_balance_db.insert_balance_with_type("SPOT", symbol=self.symbol, side="N/A", balance_usdt=spot_total, available_usdt=spot_free, notes="LIVE")
         except Exception as e:
             self.logger.log(f"[BAL] sync spot error: {e}", level="ERROR")
 
@@ -124,7 +125,8 @@ class LiveGridStrategy(BaseGridStrategy):
             info = fut_bal.get("info", {}) if isinstance(fut_bal, dict) else {}
             total_wallet = float(info.get("totalWalletBalance", 0.0) or fut_bal.get("total", 0.0))
             available = float(info.get("availableBalance", 0.0) or fut_bal.get("free", 0.0))
-            self.acc_balance_db.insert_balance_with_type("FUTURES", balance_usdt=total_wallet, available_usdt=available, notes="LIVE")
+            self.futures_available_margin = available
+            self.acc_balance_db.insert_balance_with_type("FUTURES", symbol=self.symbol_future, side="N/A", balance_usdt=total_wallet, available_usdt=available, notes="LIVE")
         except Exception as e:
             self.logger.log(f"[BAL] sync futures error: {e}", level="ERROR")
 
@@ -138,32 +140,43 @@ class LiveGridStrategy(BaseGridStrategy):
         dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
         spot_total = 0.0
         futures_total = 0.0
+        spot_free = 0.0
+        futures_avail = 0.0
         try:
             spot_bal = self.exchange.fetch_spot_balance()
             usdt_spot = spot_bal.get("USDT", {}) if isinstance(spot_bal, dict) else {}
             spot_total = float(usdt_spot.get("total", 0.0))
+            spot_free = float(usdt_spot.get("free", spot_total))
+            self.available_capital = spot_free
         except Exception as e:
             self.logger.log(f"[HEDGE] fetch spot balance error: {e}", level="ERROR")
         try:
             fut_bal = self.exchange.fetch_futures_balance()
             info = fut_bal.get("info", {}) if isinstance(fut_bal, dict) else {}
             futures_total = float(info.get("totalWalletBalance", 0.0) or fut_bal.get("total", 0.0))
+            futures_avail = float(info.get("availableBalance", 0.0) or fut_bal.get("free", 0.0))
+            self.futures_available_margin = futures_avail
         except Exception as e:
             self.logger.log(f"[HEDGE] fetch futures balance error: {e}", level="ERROR")
 
         equity = spot_total + futures_total
-        data = {
-            "record_date": dt.strftime("%Y-%m-%d"),
-            "record_time": dt.strftime("%H:%M:%S"),
-            "start_balance_usdt": round(equity, 6),
-            "net_flow_usdt": 0.0,
-            "realized_pnl_usdt": 0.0,
-            "unrealized_pnl_usdt": 0.0,
-            "fees_usdt": 0.0,
-            "end_balance_usdt": round(equity, 6),
-            "notes": notes,
-        }
         try:
-            self.acc_balance_db.insert_balance(data)
+            self.acc_balance_db.insert_balance_with_type("SPOT", symbol=self.symbol, balance_usdt=spot_total, available_usdt=spot_free, notes=notes)
+            self.acc_balance_db.insert_balance_with_type("FUTURES", symbol=self.symbol_future, balance_usdt=futures_total, available_usdt=futures_avail, notes=notes)
+            self.acc_balance_db.insert_balance(
+                {
+                    "account_type": "COMBINED",
+                    "symbol": self.symbol,
+                    "record_date": dt.strftime("%Y-%m-%d"),
+                    "record_time": dt.strftime("%H:%M:%S"),
+                    "start_balance_usdt": round(equity, 6),
+                    "net_flow_usdt": 0.0,
+                    "realized_pnl_usdt": 0.0,
+                    "unrealized_pnl_usdt": 0.0,
+                    "fees_usdt": 0.0,
+                    "end_balance_usdt": round(equity, 6),
+                    "notes": notes,
+                }
+            )
         except Exception as e:
             self.logger.log(f"[AccountBalance] record_hedge_balance error: {e}", level="ERROR")

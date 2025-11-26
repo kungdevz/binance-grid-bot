@@ -242,14 +242,7 @@ class BaseGridStrategy(IGridIO):
         high = df["High"] if "High" in df else df.get("high")
         low = df["Low"] if "Low" in df else df.get("low")
         close = df["Close"] if "Close" in df else df.get("close")
-        tr = pd.concat(
-            [
-                high - low,
-                (high - close.shift()).abs(),
-                (low - close.shift()).abs(),
-            ],
-            axis=1,
-        ).max(axis=1)
+        tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
 
         atr = tr.rolling(atr_period).mean()
         last_tr = float(tr.iloc[-1])
@@ -288,36 +281,14 @@ class BaseGridStrategy(IGridIO):
                 if c in hist.columns:
                     hist[c] = hist[c].astype(float)
 
-            current_row = pd.DataFrame(
-                [
-                    {
-                        "open": float(open),
-                        "high": float(high),
-                        "low": float(low),
-                        "close": float(close),
-                        "volume": float(volume),
-                    }
-                ],
-                index=[timestamp],  # ใช้ timestamp เป็น index
-            )
+            current_row = pd.DataFrame([{"open": float(open), "high": float(high), "low": float(low), "close": float(close), "volume": float(volume)}], index=[timestamp])  # ใช้ timestamp เป็น index
 
             df_src = pd.concat([hist, current_row], axis=0)
         else:
             # เคส live หรือไม่มี hist_df → ใช้ DB แทน
             hist = self.ohlcv_db.get_recent_ohlcv(self.symbol, 200)
 
-            current_row = pd.DataFrame(
-                [
-                    {
-                        "time": timestamp,
-                        "open": float(open),
-                        "high": float(high),
-                        "low": float(low),
-                        "close": float(close),
-                        "volume": float(volume),
-                    }
-                ]
-            ).set_index("time")
+            current_row = pd.DataFrame([{"time": timestamp, "open": float(open), "high": float(high), "low": float(low), "close": float(close), "volume": float(volume)}]).set_index("time")
 
             if hist is not None and not hist.empty:
                 # ensure numeric
@@ -412,7 +383,7 @@ class BaseGridStrategy(IGridIO):
 
     def _recalc_spacing_if_needed(self, atr_14: float, atr_28: float, curr_spacing: float) -> float:
         """
-        Soft adjust spacing :
+        Soft adjust spacing logic using ATR regime.
         - ใช้ ATR14 เทียบกับ ATR28 เพื่อตัดสินใจว่าจะขยาย/หด grid หรือไม่
         - ถ้าไม่เปลี่ยนถือว่าใช้ spacing เดิม
         """
@@ -668,27 +639,23 @@ class BaseGridStrategy(IGridIO):
             # ต้องต่างกันมากกว่า 20% ถึงจะปรับ น้อยกว่านั้นจะไม่ปรับ เพื่อลด churn
             if old_spacing > 0 and abs(new_spacing - old_spacing) / old_spacing > 0.2:
                 self.logger.log(
-                    f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - [GRID] spacing adjusted from {old_spacing:.4f} to {new_spacing:.4f} " f"(ATR14={atr_14:.4f}, ATR28={atr_28:.4f})",
-                    level="INFO",
+                    f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - [GRID] spacing adjusted from {old_spacing:.4f} to {new_spacing:.4f} " f"(ATR14={atr_14:.4f}, ATR28={atr_28:.4f})", level="INFO"
                 )
                 self.grid_spacing = new_spacing
 
             # ตรวจสอบ drift/fill → recenter แบบเต็มรูปแบบ
-            self._maybe_recenter_grid(
-                timestamp_ms=timestamp_ms,
-                price=price,
-                atr_14=atr_14,
-                atr_28=atr_28,
-            )
+            self._maybe_recenter_grid(timestamp_ms=timestamp_ms, price=price, atr_14=atr_14, atr_28=atr_28)
 
         # ===============================================================
-        # 5) Process BUY / SELL / HEDGE
+        # 5) Process BUY / SELL
         # ===============================================================
         self._process_buy_grid(timestamp_ms, price)
         self._process_sell_grid(timestamp_ms, price)
 
-        # Hedge now requires ATR/EMA row → pass row dict
-        self._process_hedge(timestamp_ms, price, row)
+        # ===============================================================
+        # 6) Hedge now requires ATR/EMA row → pass row dict
+        # ===============================================================
+        # self._process_hedge(timestamp_ms, price, row)
 
     # ------------------------------------------------------------------
     # BUY logic
@@ -708,12 +675,11 @@ class BaseGridStrategy(IGridIO):
         if remaining_slots <= 0:
             return
 
-        # คำนวณ order_size_usdt แบบ dynamic จาก remaining_slots
+        # calculate us order_size_usdt แบบ dynamic จาก remaining_slots
         order_size_usdt = self._compute_dynamic_order_size(remaining_slots)
 
         for level_price in self.grid_prices:
             filled = self.grid_filled.get(level_price, False)
-
             if price <= level_price and not filled:
                 qty = round(order_size_usdt / level_price, 6)
                 notional = level_price * qty
@@ -728,7 +694,6 @@ class BaseGridStrategy(IGridIO):
                     continue
 
                 order_info = self._io_place_spot_buy(timestamp_ms=timestamp_ms, price=level_price, qty=qty, grid_id=self.grid_group_id)
-
                 self.available_capital = max(0.0, self.available_capital - total_cost)
 
                 # --- คำนวณ target ตาม ATR-based spacing ---
@@ -754,24 +719,19 @@ class BaseGridStrategy(IGridIO):
                     grid_price=level_price,
                     target_price=target,
                     opened_at=timestamp_ms,
-                    group_id=self.grid_group_id or "",
+                    group_id=self.grid_group_id,
                     meta={"order": order_info},
                 )
 
                 self.positions.append(pos)
                 self.grid_filled[level_price] = True
-
                 self.logger.log(
-                    f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - Grid BUY filled @ {level_price} qty={qty}, target={target}, remaining_cap={self.available_capital}",
+                    f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - Grid BUY filled @ {level_price} qty={qty}, target={target}, notional={notional}, fee={fee}, remaining_cap={self.available_capital}",
                     level="INFO",
                 )
 
                 # Snapshot account_balance (It's support only in the backtest/forward_test mode.)
-                self._snapshot_account_balance(
-                    timestamp_ms=timestamp_ms,
-                    current_price=price,
-                    notes=f"BUY @ {level_price}",
-                )
+                self._snapshot_account_balance(timestamp_ms=timestamp_ms, current_price=price, side="BUY", notes=f"BUY @ {level_price}")
 
     # ------------------------------------------------------------------
     # SELL logic
@@ -842,11 +802,7 @@ class BaseGridStrategy(IGridIO):
                 )
 
             # ----- snapshot account_balance (จะทำงานเฉพาะ backtest/forward_test) -----
-            self._snapshot_account_balance(
-                timestamp_ms=timestamp_ms,
-                current_price=price,
-                notes=f"SELL @ {price}",
-            )
+            self._snapshot_account_balance(timestamp_ms=timestamp_ms, current_price=price, side="SELL", notes=f"SELL @ {price}")
 
         # เก็บเฉพาะ positions ที่ยังไม่ถึงเป้าหมาย
         self.positions = remaining_positions
@@ -961,7 +917,8 @@ class BaseGridStrategy(IGridIO):
 
         add_ratio = target_ratio - current_ratio
         add_qty = net_spot_qty * add_ratio
-        notional = add_qty * price / max(self.hedge_leverage, 1)
+        notional = add_qty * price
+        required_margin = notional / max(self.hedge_leverage, 1)
 
         # refresh futures margin from DB
         try:
@@ -987,9 +944,9 @@ class BaseGridStrategy(IGridIO):
                 level="INFO",
             )
             return
-        if notional > self.futures_available_margin:
+        if required_margin > self.futures_available_margin:
             self.logger.log(
-                f"Date: {util.timemstamp_ms_to_date(ts)} - [HEDGE] skip add hedge (notional={notional:.4f}, available={self.futures_available_margin:.4f}, "
+                f"Date: {util.timemstamp_ms_to_date(ts)} - [HEDGE] skip add hedge (req_margin={required_margin:.4f}, available={self.futures_available_margin:.4f}, "
                 f"target_ratio={target_ratio:.2f}, net_spot={net_spot_qty:.4f})",
                 level="INFO",
             )
@@ -1012,12 +969,15 @@ class BaseGridStrategy(IGridIO):
             self.hedge_position["qty"] = new_qty
             self.hedge_position["entry"] = new_entry
             self.hedge_position["order_id"] = self._record_hedge_open(qty=add_qty, price=hedge_entry_price)
+        # consume margin for backtest/paper tracking
+        self.futures_available_margin = max(0.0, self.futures_available_margin - required_margin)
 
         self.logger.log(
             f"Date: {util.timemstamp_ms_to_date(ts)} - [HEDGE] scale-in {reason}: add_qty={add_qty:.4f}, "
             f"target_ratio={target_ratio:.2f}, "
             f"new_qty={self.hedge_position['qty']:.4f}, "
-            f"entry={self.hedge_position['entry']:.4f}",
+            f"entry={self.hedge_position['entry']:.4f}, "
+            f"req_margin={required_margin:.4f}, avail_margin={self.futures_available_margin:.4f}",
             level="INFO",
         )
         # snapshot combined balance for hedge open
@@ -1040,7 +1000,7 @@ class BaseGridStrategy(IGridIO):
         hedge_qty = h["qty"]
         hedge_entry = h["entry"]
 
-        # short: กำไร = (entry - price) * qty
+        # short: profit = (entry - price) * qty
         hedge_pnl = (hedge_entry - price) * hedge_qty
 
         loss_to_cover = max(0.0, -spot_unrealized)
@@ -1101,6 +1061,10 @@ class BaseGridStrategy(IGridIO):
             price=price,
             reason=reason,
         )
+        if self.mode in ("backtest", "forward_test"):
+            # apply realized hedge pnl to cash so combined equity reflects it
+            self.available_capital += pnl
+            self.futures_available_margin = max(0.0, self.futures_available_margin + pnl)
         try:
             self._record_hedge_close(close_price=price, realized_pnl=pnl)
         except Exception as e:
@@ -1195,11 +1159,7 @@ class BaseGridStrategy(IGridIO):
 
         if order_id:
             try:
-                self.futures_db.close_hedge_order(
-                    order_id=order_id,
-                    close_price=close_price,
-                    realized_pnl=realized_pnl,
-                )
+                self.futures_db.close_hedge_order(order_id=order_id, close_price=close_price, realized_pnl=realized_pnl)
                 return
             except Exception as e:
                 self.logger.log(f"[HEDGE] close_hedge_order error: {e}", level="ERROR")
@@ -1215,17 +1175,20 @@ class BaseGridStrategy(IGridIO):
         """
         if not hasattr(self, "acc_balance_db") or self.acc_balance_db is None:
             return
+        # Backtest/forward_test: balances are simulated in-memory, do not read DB snapshots
+        if getattr(self, "mode", None) in ("backtest", "forward_test"):
+            return
         try:
             spot_row = self.acc_balance_db.get_latest_balance_by_type("SPOT", symbol=self.symbol)
             if spot_row:
-                self.available_capital = float(spot_row.get("end_balance_usdt", self.available_capital))
+                self.available_capital = float(spot_row.get("end_balance_usdt"))
             fut_row = self.acc_balance_db.get_latest_balance_by_type("FUTURES", symbol=self.symbol_future)
             if fut_row:
-                self.futures_available_margin = float(fut_row.get("end_balance_usdt", self.futures_available_margin))
+                self.futures_available_margin = float(fut_row.get("end_balance_usdt"))
         except Exception as e:
-            self.logger.log(f"[BAL] refresh error: {e}", level="ERROR")
+            self.logger.log(f"[BAL] refresh db error: {e}", level="ERROR")
 
-    def _snapshot_account_balance(self, timestamp_ms: int, current_price: float, notes: str = "") -> None:
+    def _snapshot_account_balance(self, timestamp_ms: int, current_price: float, side: str, notes: str = "") -> None:
         """
         สร้าง snapshot ลง table account_balance
         - ใช้เฉพาะ backtest/forward_test (กันไม่ให้ spam ตอน live)
@@ -1245,8 +1208,9 @@ class BaseGridStrategy(IGridIO):
         realized_pnl = float(self.realized_grid_profit)
         # backtest: net_flow_usdt = 0 (ไม่มีฝากถอน), fees_usdt = 0 (ถ้ายังไม่ได้คิด fee)
         data = {
-            "account_type": "SPOT",
+            "account_type": "COMBINED",
             "symbol": self.symbol,
+            "side": side,
             "record_date": record_date,
             "record_time": record_time,
             "start_balance_usdt": round(equity, 6),
@@ -1272,6 +1236,8 @@ class BaseGridStrategy(IGridIO):
             return
 
         dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+        spot_unreal = self._calc_unrealized_pnl(current_price)
+        spot_value = sum(p.qty * current_price for p in self.positions)
         hedge_unreal = 0.0
         try:
             if self.hedge_position:
@@ -1280,22 +1246,40 @@ class BaseGridStrategy(IGridIO):
         except Exception:
             hedge_unreal = 0.0
 
-        equity = float(self.futures_available_margin)
-        data = {
-            "account_type": "FUTURES",
-            "symbol": self.symbol_future,
-            "record_date": dt.strftime("%Y-%m-%d"),
-            "record_time": dt.strftime("%H:%M:%S"),
-            "start_balance_usdt": round(equity, 6),
-            "net_flow_usdt": 0.0,
-            "realized_pnl_usdt": 0.0,
-            "unrealized_pnl_usdt": round(hedge_unreal, 6),
-            "fees_usdt": 0.0,
-            "end_balance_usdt": round(equity, 6),
-            "notes": notes,
-        }
+        combined_equity = float(self.available_capital + self.reserve_capital + spot_value + hedge_unreal)
         try:
-            self.acc_balance_db.insert_balance(data)
+            # combined snapshot
+            self.acc_balance_db.insert_balance(
+                {
+                    "account_type": "COMBINED",
+                    "symbol": self.symbol,
+                    "record_date": dt.strftime("%Y-%m-%d"),
+                    "record_time": dt.strftime("%H:%M:%S"),
+                    "start_balance_usdt": round(combined_equity, 6),
+                    "net_flow_usdt": 0.0,
+                    "realized_pnl_usdt": round(float(self.realized_grid_profit), 6),
+                    "unrealized_pnl_usdt": round(spot_unreal + hedge_unreal, 6),
+                    "fees_usdt": 0.0,
+                    "end_balance_usdt": round(combined_equity, 6),
+                    "notes": notes,
+                }
+            )
+            # futures snapshot uses available margin
+            self.acc_balance_db.insert_balance(
+                {
+                    "account_type": "FUTURES",
+                    "symbol": self.symbol_future,
+                    "record_date": dt.strftime("%Y-%m-%d"),
+                    "record_time": dt.strftime("%H:%M:%S"),
+                    "start_balance_usdt": round(self.futures_available_margin, 6),
+                    "net_flow_usdt": 0.0,
+                    "realized_pnl_usdt": 0.0,
+                    "unrealized_pnl_usdt": round(hedge_unreal, 6),
+                    "fees_usdt": 0.0,
+                    "end_balance_usdt": round(self.futures_available_margin, 6),
+                    "notes": notes,
+                }
+            )
         except Exception as e:
             self.logger.log(f"[AccountBalance] record_hedge_balance error: {e}", level="ERROR")
 

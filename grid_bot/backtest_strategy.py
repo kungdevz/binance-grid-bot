@@ -139,31 +139,13 @@ class BacktestGridStrategy(BaseGridStrategy):
 
         self.logger.log(f"Loading OHLCV data from {file_path}", level="INFO")
         df = pd.read_csv(file_path, parse_dates=["Time"])
-        df.rename(
-            columns={
-                "Time": "time",
-                "Open": "open",
-                "High": "high",
-                "Low": "low",
-                "Close": "close",
-                "Volume": "volume",
-            },
-            inplace=True,
-        )
+        df.rename(columns={"Time": "time", "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"}, inplace=True)
         df.set_index("time", inplace=True)
         df_history = df.iloc[:100]
 
         for idx, row in df.iloc[100:].iterrows():
             ts = int(idx.value // 10**6)  # Timestamp → ms
-            self.on_bar(
-                ts,
-                float(row["open"]),
-                float(row["high"]),
-                float(row["low"]),
-                float(row["close"]),
-                float(row["volume"]),
-                df_history,
-            )
+            self.on_bar(ts, float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]), float(row["volume"]), df_history)
         return None
 
     def _io_open_hedge_short(self, timestamp_ms: int, qty: float, price: float, reason: str) -> Optional[float]:

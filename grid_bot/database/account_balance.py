@@ -24,6 +24,7 @@ class AccountBalance(BaseMySQLRepo):
                     `id` INT AUTO_INCREMENT PRIMARY KEY,              -- ไอดีอัตโนมัติ
                     `account_type` VARCHAR(20) DEFAULT NULL,          -- ประเภทบัญชี (SPOT/FUTURES)
                     `symbol` VARCHAR(20) DEFAULT NULL,                -- สัญลักษณ์ (เช่น BTCUSDT)
+                    `side` VARCHAR(10) DEFAULT NULL,                  -- ฝั่ง (BUY/SELL/OPEN/CLOSE)
                     `record_date` DATE NOT NULL,                      -- วันที่บันทึก (YYYY-MM-DD)
                     `record_time` TIME NOT NULL,                      -- เวลาบันทึก (HH:MM:SS)
                     `start_balance_usdt` DECIMAL(18,6) NOT NULL,      -- ยอดเงินเริ่มต้น (USDT)
@@ -54,11 +55,47 @@ class AccountBalance(BaseMySQLRepo):
             cursor.close()
             conn.close()
 
+    def insert_balance_with_type(self, account_type: str, symbol: str, side: str, balance_usdt: float, available_usdt: float, notes: str = "") -> int:
+        """
+        Convenience helper to insert a snapshot tagged by account_type (SPOT/FUTURES/COMBINED).
+        - start_balance_usdt: total balance
+        - end_balance_usdt: available balance
+        """
+        dt = datetime.now()
+        data = {
+            "account_type": account_type.upper(),
+            "symbol": symbol,
+            "side": side.upper(),
+            "record_date": dt.strftime("%Y-%m-%d"),
+            "record_time": dt.strftime("%H:%M:%S"),
+            "start_balance_usdt": balance_usdt,
+            "net_flow_usdt": 0.0,
+            "realized_pnl_usdt": 0.0,
+            "unrealized_pnl_usdt": 0.0,
+            "fees_usdt": 0.0,
+            "end_balance_usdt": available_usdt,
+            "notes": notes,
+        }
+        return self.insert_balance(data)
+
     def insert_balance(self, data: Dict[str, Any]) -> int:
         """
         Insert a new Account Balance. Returns the internal row id.
         """
-        cols = ["account_type", "symbol", "record_date", "record_time", "start_balance_usdt", "net_flow_usdt", "realized_pnl_usdt", "unrealized_pnl_usdt", "fees_usdt", "end_balance_usdt", "notes"]
+        cols = [
+            "account_type",
+            "symbol",
+            "side",
+            "record_date",
+            "record_time",
+            "start_balance_usdt",
+            "net_flow_usdt",
+            "realized_pnl_usdt",
+            "unrealized_pnl_usdt",
+            "fees_usdt",
+            "end_balance_usdt",
+            "notes",
+        ]
 
         placeholders = ", ".join(["%s" for _ in cols])  # ✅ MySQL ใช้ %s
         values = [data.get(col) for col in cols]
