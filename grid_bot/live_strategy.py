@@ -34,7 +34,6 @@ class LiveGridStrategy(BaseGridStrategy):
             initial_capital=initial_capital,
             grid_levels=grid_levels,
             atr_multiplier=atr_multiplier,
-            order_size_usdt=order_size_usdt,
             reserve_ratio=reserve_ratio,
             mode="live",
             logger=logger,
@@ -55,7 +54,7 @@ class LiveGridStrategy(BaseGridStrategy):
         resp = self.exchange.place_limit_buy(self.symbol, price, qty, exchange=True)
 
         # แปลง response เป็นรูปแบบเดียวกับ SpotOrders
-        order_data = self._build_spot_order_data(resp, grid_id)
+        order_data = self._build_order_data(resp, grid_id)
         try:
             self.spot_orders_db.create_order(order_data)
         except Exception as e:
@@ -107,6 +106,10 @@ class LiveGridStrategy(BaseGridStrategy):
         This stub keeps the class concrete for instantiation.
         """
         self.logger.log("[Live] _run is not implemented; feed candles via on_bar/on_candle", level="INFO")
+
+    def _io_refresh_balances(self) -> None:
+        # live ใช้ exchange เป็น source หลัก
+        self.sync_balances_to_db()
 
     # Balance sync
     def sync_balances_to_db(self) -> None:

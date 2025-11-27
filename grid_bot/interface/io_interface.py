@@ -49,4 +49,16 @@ class IGridIO(ABC):
 
     @abstractmethod
     def _run(self, timestamp_ms: int) -> None:
+        """
+        main loop I/O operation per timestamp
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _io_refresh_balances(self) -> None:
+        """
+        ใช้ refresh available_capital (spot) และ futures_available_margin (futures)
+        - backtest/forward: จาก DB
+        - live: จาก exchange
+        """
         raise NotImplementedError

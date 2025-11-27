@@ -14,6 +14,7 @@ from grid_bot.database.future_orders import FuturesOrders
 from grid_bot.database.account_balance import AccountBalance
 from grid_bot.database.logger import Logger
 
+from grid_bot.strategy.atr_calculator import ATRCalculator as atr_calc
 from grid_bot.datas.position import Position
 import grid_bot.utils.util as util
 
@@ -31,7 +32,6 @@ class BaseGridStrategy(IGridIO):
         initial_capital: float,
         grid_levels: int,
         atr_multiplier: float,
-        order_size_usdt: float,
         reserve_ratio: float,
         mode: str,
         logger: Optional[Logger] = None,
@@ -43,7 +43,6 @@ class BaseGridStrategy(IGridIO):
         # Money
         self.initial_capital = float(initial_capital)
         self.reserve_ratio = float(reserve_ratio)
-        self.order_size_usdt = float(order_size_usdt)
         self.total_capital = float(initial_capital)
         self.reserve_capital = self.total_capital * self.reserve_ratio
         self.futures_available_margin = self.total_capital * self.reserve_ratio  # assume half for futures margin
@@ -57,6 +56,9 @@ class BaseGridStrategy(IGridIO):
         self.grid_filled: Dict[float, bool] = {}  # grid_price -> bool
         self.grid_group_id: Optional[str] = None
         self.grid_spacing: float = 0.0  # ระยะห่าง grid ปัจจุบัน (ใช้ทั้ง init+recalc)
+
+        # >>> NEW: flag สำหรับ recenter ที่รอ hedge ทำงานก่อน <<<
+        self.pending_recenter: Optional[dict] = None
 
         # tuning parameter สำหรับ recalc
         self.vol_up_ratio: float = 1.5  # ATR14 > ATR28 * 1.5 → ถือว่าผันผวนสูง
@@ -72,8 +74,8 @@ class BaseGridStrategy(IGridIO):
         self.hedge_size_ratio: float = 0.5  # hedge 50% ของ net spot เป็นเป้า max
         self.hedge_leverage: int = 2  # leverage ฝั่ง futures (เอาไปใช้ใน I/O layer)
         self.hedge_open_k_atr: float = 0.5  # เปิด hedge เพิ่มเมื่อหลุด lowest - 0.5*ATR
-        self.hedge_tp_ratio: float = 0.5  # TP hedge เมื่อกำไร hedge ~ 50% ของ spot unrealized loss
-        self.hedge_sl_ratio: float = 0.3  # SL hedge เมื่อขาดทุน ~ 30% ของ spot unrealized loss
+        self.hedge_tp_ratio: float = 0.05  # TP hedge เมื่อกำไร hedge ~ 5% ของ spot unrealized loss
+        self.hedge_sl_ratio: float = 0.1  # SL hedge เมื่อขาดทุน ~ 10% ของ spot unrealized loss
         self.min_hedge_notional: float = 5.0  # notional ขั้นต่ำของ hedge (กัน dust)
         self.hedge_max_loss_ratio: float = 1.0  # max hedge loss relative to |spot loss|
         self.hedge_min_hold_ms: int = 5 * 60 * 1000  # hold time before reversal cut
@@ -106,61 +108,6 @@ class BaseGridStrategy(IGridIO):
     # ------------------------------------------------------------------
     # Common Logic
     # ------------------------------------------------------------------
-    def _calc_tr_single(self, high: float, low: float, prev_close: Optional[float]) -> float:
-        """
-        True Range (TR) ต่อ 1 แท่ง:
-        TR = max(H-L, |H-Cp|, |L-Cp|)
-        ถ้าไม่มี previous close (แท่งแรก) → ใช้แค่ H-L
-        """
-        if prev_close is None:
-            return float(high - low)
-
-        tr1 = high - low
-        tr2 = abs(high - prev_close)
-        tr3 = abs(low - prev_close)
-        return float(max(tr1, tr2, tr3))
-
-    def _calc_atr_from_history(self, tr_hist: List[float], tr_current: float, periods: Tuple[int, ...] = (14, 28)) -> Dict[int, float]:
-        """
-        คำนวณ ATR หลาย period จาก
-        - tr_hist: list ของ TR ย้อนหลัง
-        - tr_current: TR ของแท่งปัจจุบัน
-        return: {period: atr_value}
-        """
-        all_tr = tr_hist + [tr_current]
-        atr_values: Dict[int, float] = {}
-
-        for p in periods:
-            window = all_tr[-p:]
-            atr_values[p] = float(np.mean(window)) if window else 0.0
-
-        return atr_values
-
-    def _calc_ema_from_history(self, hist: pd.DataFrame, close: float, periods: Tuple[int, ...] = (14, 28, 50, 100, 200)) -> Dict[str, float]:
-        """
-        คำนวณ EMA หลาย period จากข้อมูลแท่งล่าสุดใน hist + close ปัจจุบัน
-        ถ้ายังไม่มีค่า EMA เดิม → ใช้ close ปัจจุบันเป็นค่าเริ่มต้น
-        """
-        if not hist.empty:
-            prev = hist.iloc[-1]
-        else:
-            prev = None
-
-        ema_values: Dict[str, float] = {}
-
-        for period in periods:
-            col_name = f"ema_{period}"
-            alpha = 2 / (period + 1)
-
-            if prev is None or col_name not in prev or pd.isna(prev[col_name]):
-                # แท่งแรก → seed ด้วย close ปัจจุบัน
-                ema_values[col_name] = float(close)
-            else:
-                prev_val = float(prev[col_name])
-                ema_values[col_name] = float(alpha * close + (1 - alpha) * prev_val)
-
-        return ema_values
-
     def _calc_atr_ema_from_df(self, df: pd.DataFrame, atr_periods: Tuple[int, ...] = (14, 28), ema_periods: Tuple[int, ...] = (14, 28, 50, 100, 200)) -> Dict[str, float]:
         """
         รับ df (ที่มี high, low, close ครบ และรวมแท่งปัจจุบันแล้ว)
@@ -180,7 +127,7 @@ class BaseGridStrategy(IGridIO):
             return vals
 
         # 1) TR series
-        tr_series = self._calc_tr_series(df)
+        tr_series = atr_calc._calc_tr_series(df)
         tr_last = float(tr_series.iloc[-1])
 
         result: Dict[str, float] = {"tr": tr_last}
@@ -200,35 +147,6 @@ class BaseGridStrategy(IGridIO):
             result[f"ema_{p}"] = ema_last
 
         return result
-
-    def _calc_tr_series(self, df: pd.DataFrame) -> pd.Series:
-        """
-        คืนค่า pandas Series ของ TR สำหรับทุกแท่งใน df
-        df ต้องมีคอลัมน์: high, low, close
-        """
-
-        if df.empty:
-            return pd.Series(dtype=float)
-
-        high = df["high"].astype(float)
-        low = df["low"].astype(float)
-        close = df["close"].astype(float)
-
-        # previous close
-        prev_close = close.shift(1)
-
-        # TR components
-        tr1 = high - low
-        tr2 = (high - prev_close).abs()
-        tr3 = (low - prev_close).abs()
-
-        # True Range = max(tr1, tr2, tr3)
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-        # if the first candle have not prev_close, so we use TR = high - low
-        tr.iloc[0] = tr1.iloc[0]
-
-        return tr
 
     def define_spacing_size(self, atr_period: int, history: pd.DataFrame) -> float:
         """
@@ -274,7 +192,15 @@ class BaseGridStrategy(IGridIO):
         # ------------------------------------------------------------------
         if hist_df is not None and not hist_df.empty:
             # add hist_df from backtest + append the current row with timestamp, open, high, low, close, volume
-            hist = hist_df.copy()
+            hist = hist_df.rename(
+                columns={
+                    "Open": "open",
+                    "High": "high",
+                    "Low": "low",
+                    "Close": "close",
+                    "Volume": "volume",
+                }
+            ).copy()
 
             # ensure numeric
             for c in ["open", "high", "low", "close", "volume"]:
@@ -371,7 +297,50 @@ class BaseGridStrategy(IGridIO):
         if not need_recenter:
             return
 
-        # hedge guard: skip recenter if hedge would be closed at loss
+        # ดึง row + ตรวจ trend
+        last = self.ohlcv_db.get_recent_ohlcv(self.symbol, 1)
+        if last is None or last.empty:
+            return
+
+        row = last.iloc[-1].to_dict()
+        trend = self._get_trend_direction(row, price)
+
+        # ===============================
+        # 1) DOWNTREND:
+        #    - cancel buy ที่ยังไม่ fill
+        #    - ขาย spot ครึ่งหนึ่ง + เปิด hedge ให้ cover loss
+        #    - ทำ "pending recenter" ไว้ → ให้ hedge จัดการต่อ
+        # ===============================
+        if trend == "down":
+            self._recenter_downtrend(timestamp_ms, price, atr_14, atr_28, row)
+
+            # mark ว่ามี recenter รออยู่ ให้ hedge เป็นคน trigger ทีหลัง
+            self.pending_recenter = {
+                "initiated_at": timestamp_ms,
+                "reason": "DOWN_TREND",
+            }
+            self.logger.log(
+                f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - [GRID] recenter DOWN pending (wait hedge PnL >= 0)",
+                level="INFO",
+            )
+            return
+
+        # ===============================
+        # 2) UPTREND:
+        #    - ไม่ hedge ใหม่
+        #    - ขายเฉพาะ spot ที่กำไร
+        #    - ปิด grid เก่า + เปิด lower grid ใหม่ทันที
+        # ===============================
+        if trend == "up":
+            self._recenter_uptrend(timestamp_ms, price, atr_14, atr_28)
+            # path นี้ recenter เสร็จแล้วในตัวเอง ไม่ต้องเรียก _do_full_recenter
+            return
+
+        # ===============================
+        # 3) SIDEWAYS / FALLBACK:
+        #    ถ้าไม่ได้ชัดว่า up/down → ใช้ full recenter ปกติ
+        #    พร้อม hedge guard: ถ้ามี hedge แล้วกำลังขาดทุนจะไม่ recenter
+        # ===============================
         if self.hedge_position:
             h = self.hedge_position
             hedge_pnl = (float(h["entry"]) - float(price)) * float(h["qty"])
@@ -479,6 +448,280 @@ class BaseGridStrategy(IGridIO):
 
         return float(spacing)
 
+    def _recenter_downtrend(self, timestamp_ms: int, price: float, atr_14: float, atr_28: float, row: dict) -> None:
+        """
+        Downtrend recenter flow:
+
+        1) ยกเลิก BUY orders ที่ยังไม่ถูก fill ทั้งหมดใน grid group ปัจจุบัน
+        2) รวม spot ทั้งหมด แล้วขายออก "ครึ่งหนึ่ง" (reduce exposure)
+           - ใช้ _io_place_spot_sell เดิม แต่สร้าง Position ชั่วคราวเพื่อ partial close
+        3) หลังขายครึ่งหนึ่ง → คำนวณ hedge ให้ cover net spot ที่เหลือ (target_ratio ~ 1.0)
+        4) ไม่ทำ full recenter ทันที แต่ set self.pending_recenter
+           ให้รอ _manage_hedge_exit() เรียก _do_full_recenter เมื่อ hedge PnL >= 0
+        """
+
+        # 1) ปิด BUY orders ที่ยังไม่ถูก fill ทั้งหมดใน grid ปัจจุบัน
+        if self.grid_group_id:
+            try:
+                closed = self.spot_orders_db.close_open_orders_by_group(symbol=self.symbol, grid_id=self.grid_group_id, reason="RECENTER_DOWN_TREND_CANCEL_BUYS")
+                self.logger.log(f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - " f"[GRID] recenter_downtrend: cancel open BUY orders count={closed}", level="INFO")
+            except Exception as e:
+                self.logger.log(f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - " f"[GRID] recenter_downtrend: close_open_orders_by_group error: {e}", level="ERROR")
+
+        # 2) รวม spot qty ทั้งหมด
+        total_qty = sum(p.qty for p in self.positions)
+        if total_qty <= 0:
+            # ไม่มี spot ให้จัดการ → แค่ mark pending_recenter ไว้ให้ hedge ทำงานต่อ
+            self.logger.log(f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - " "[GRID] recenter_downtrend: no spot positions, skip SL half.", level="INFO")
+            return
+
+        target_sl_qty = total_qty * 0.5
+        qty_to_sl = target_sl_qty
+
+        # ขายจาก position ที่ entry สูงก่อน (เสี่ยงสุด)
+        positions_sorted = sorted(self.positions, key=lambda p: p.entry_price, reverse=True)
+        new_positions: List[Position] = []
+        is_paper = self.mode in ("backtest", "forward_test")
+
+        for p in positions_sorted:
+            if qty_to_sl <= 0:
+                # ไม่ต้องขายเพิ่มแล้ว เก็บ position ไว้ทั้งก้อน
+                new_positions.append(p)
+                continue
+
+            sell_qty = min(p.qty, qty_to_sl)
+
+            # --- ใช้ _io_place_spot_sell เดิม แต่ทำ partial โดยสร้าง Position ชั่วคราว ---
+            sell_pos = Position(
+                symbol=p.symbol,
+                side=p.side,
+                entry_price=p.entry_price,
+                qty=sell_qty,
+                grid_price=p.grid_price,
+                target_price=p.target_price,
+                opened_at=p.opened_at,
+                group_id=p.group_id,
+                hedged=p.hedged,
+                meta=p.meta,
+            )
+
+            try:
+                self._io_place_spot_sell(timestamp_ms=timestamp_ms, position=sell_pos, sell_price=price)
+            except Exception as e:
+                self.logger.log(
+                    f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - " f"[RECENTER_DOWN] spot partial sell error entry={p.entry_price}: {e}",
+                    level="ERROR",
+                )
+                # ถ้าขายไม่สำเร็จ ยังเก็บ position เดิมไว้
+                new_positions.append(p)
+                continue
+
+            if is_paper:
+                notional = price * sell_qty
+                pnl = (price - p.entry_price) * sell_qty
+                self.available_capital += notional
+                self.realized_grid_profit += pnl
+
+                self.logger.log(
+                    f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - "
+                    f"[RECENTER_DOWN][PAPER] partial SELL qty={sell_qty:.4f} @ {price:.4f}, "
+                    f"entry={p.entry_price:.4f}, pnl={pnl:.4f}, "
+                    f"total_realized={self.realized_grid_profit:.4f}",
+                    level="INFO",
+                )
+
+            qty_to_sl -= sell_qty
+
+            # ถ้าเหลือบางส่วนของ position เดิม → เก็บกลับเข้า new_positions
+            remaining_qty = p.qty - sell_qty
+            if remaining_qty > 0:
+                new_positions.append(
+                    Position(
+                        symbol=p.symbol,
+                        side=p.side,
+                        entry_price=p.entry_price,
+                        qty=remaining_qty,
+                        grid_price=p.grid_price,
+                        target_price=p.target_price,
+                        opened_at=p.opened_at,
+                        group_id=p.group_id,
+                        hedged=p.hedged,
+                        meta=p.meta,
+                    )
+                )
+
+        self.positions = new_positions
+
+        # 3) หลังจากขายครึ่งหนึ่ง → คำนวณ hedge size ให้ cover net spot ที่เหลือ
+        remaining_qty = sum(p.qty for p in self.positions)
+        if remaining_qty <= 0:
+            self.logger.log(
+                f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - " "[RECENTER_DOWN] no remaining spot after SL half, skip hedge scale-in.",
+                level="INFO",
+            )
+            return
+
+        try:
+            self._ensure_hedge_ratio(
+                timestamp_ms=timestamp_ms,
+                target_ratio=1.0,  # hedge ประมาณ 100% ของ net spot ที่เหลือ
+                price=price,
+                net_spot_qty=remaining_qty,
+                reason="RECENTER_DOWN_TREND_HEDGE",
+            )
+        except Exception as e:
+            self.logger.log(
+                f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - " f"[RECENTER_DOWN] ensure_hedge_ratio error: {e}",
+                level="ERROR",
+            )
+
+        # (option) snapshot account balance ใน backtest
+        self._snapshot_account_balance(
+            timestamp_ms=timestamp_ms,
+            current_price=price,
+            side="RECENTER_DOWN",
+            notes="recenter_downtrend: SL half + hedge scale-in",
+        )
+
+    def _recenter_uptrend(self, timestamp_ms: int, price: float, atr_14: float, atr_28: float) -> None:
+        """
+        UPTREND recenter flow:
+
+        0) ไม่เปิด hedge ใหม่
+        1) ถ้ามี hedge เดิมและกำไร/ไม่ขาดทุน → ปิดก่อน
+        2) ขาย spot ที่มีกำไรทั้งหมด (lock profit)
+        3) deactivate grid เก่า + cancel open orders ทั้งหมดของ group เดิม
+        4) reset in-memory grid แล้วสร้าง lower-only grid ใหม่ตาม ATR
+        """
+
+        # 0) ไม่เปิด hedge ใหม่ใน path นี้
+
+        # ถ้ามี hedge position ค้างอยู่ และกำไร/ไม่ขาดทุน -> ปิดทิ้งไปก่อน
+        if self.hedge_position:
+            h = self.hedge_position
+            hedge_pnl = (float(h["entry"]) - price) * float(h["qty"])
+            if hedge_pnl >= 0:
+                self.logger.log(
+                    f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - " f"[RECENTER_UP] close existing hedge with pnl={hedge_pnl:.4f}",
+                    level="INFO",
+                )
+                self._close_hedge(
+                    timestamp_ms=timestamp_ms,
+                    price=price,
+                    reason="UPTREND_RECENTER_CLOSE_HEDGE",
+                )
+
+        # 1) ขาย spot ที่มีกำไรทั้งหมด
+        is_paper = self.mode in ("backtest", "forward_test")
+        new_positions: List[Position] = []
+
+        for p in self.positions:
+            unreal = (price - p.entry_price) * p.qty
+            if unreal > 0:
+                # ขายเอากำไร
+                try:
+                    self._io_place_spot_sell(
+                        timestamp_ms=timestamp_ms,
+                        position=p,
+                        sell_price=price,
+                    )
+                except Exception as e:
+                    self.logger.log(
+                        f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - " f"[RECENTER_UP] spot sell error entry={p.entry_price}: {e}",
+                        level="ERROR",
+                    )
+                    # ถ้าขายไม่สำเร็จ → ยังเก็บ position ไว้
+                    new_positions.append(p)
+                    continue
+
+                if is_paper:
+                    notional = price * p.qty
+                    pnl = unreal
+                    self.available_capital += notional
+                    self.realized_grid_profit += pnl
+
+                    self.logger.log(
+                        f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - "
+                        f"[RECENTER_UP][PAPER] SELL profitable pos entry={p.entry_price:.4f}, "
+                        f"qty={p.qty:.4f}, pnl={pnl:.4f}, total_realized={self.realized_grid_profit:.4f}",
+                        level="INFO",
+                    )
+            else:
+                new_positions.append(p)
+
+        self.positions = new_positions
+
+        # 2) Deactivate grid เก่า + close open orders ทั้งหมดของ group เดิม
+        old_group = self.grid_group_id
+        if old_group:
+            try:
+                deact = self.grid_db.deactivate_group(
+                    symbol=self.symbol,
+                    group_id=old_group,
+                    reason="RECENTER_UP",
+                )
+                self.logger.log(
+                    f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - " f"[GRID] recenter_uptrend: deactivate_group group={old_group}, rows={deact}",
+                    level="INFO",
+                )
+            except Exception as e:
+                self.logger.log(
+                    f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - " f"[GRID] recenter_uptrend deactivate_group error: {e}",
+                    level="ERROR",
+                )
+
+            try:
+                closed_spot = self.spot_orders_db.close_open_orders_by_group(
+                    symbol=self.symbol,
+                    grid_id=old_group,
+                    reason="RECENTER_UP",
+                )
+                self.logger.log(
+                    f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - " f"[SPOT] recenter_uptrend: cancel open orders group={old_group}, count={closed_spot}",
+                    level="INFO",
+                )
+            except Exception as e:
+                self.logger.log(
+                    f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - " f"[SPOT] recenter_uptrend close_open_orders_by_group error: {e}",
+                    level="ERROR",
+                )
+
+            try:
+                closed_fut = self.futures_db.close_open_orders_by_group(
+                    symbol=self.symbol_future,
+                    reason="RECENTER_UP",
+                )
+                self.logger.log(
+                    f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - " f"[FUTURES] recenter_uptrend: close_open_orders_by_group symbol={self.symbol_future}, count={closed_fut}",
+                    level="INFO",
+                )
+            except Exception as e:
+                self.logger.log(
+                    f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - " f"[FUTURES] recenter_uptrend close_open_orders_by_group error: {e}",
+                    level="ERROR",
+                )
+
+        # 3) Reset in-memory grid แต่ไม่ยุ่งกับ spot ขาดทุนที่เหลือ
+        self.grid_prices = []
+        self.grid_filled = {}
+        self.grid_group_id = None
+        self.grid_spacing = 0.0
+        # self.hedge_position น่าจะถูกปิดไปแล้วด้านบน ถ้า pnl >= 0
+
+        # 4) สร้าง lower-only grid ใหม่ตาม ATR เหมือนเดิม
+        new_spacing = self._compute_recenter_spacing(
+            price=price,
+            atr_14=atr_14,
+            atr_28=atr_28,
+            prior_spacing=self.grid_spacing,
+        )
+        self._init_lower_grid(
+            timestamp_ms=timestamp_ms,
+            base_price=price,
+            atr=atr_14,
+            spacing_override=new_spacing,
+        )
+
     def _do_full_recenter(self, timestamp_ms: int, price: float, atr_14: float, atr_28: float) -> None:
         """
         Execute full recenter pipeline:
@@ -503,16 +746,7 @@ class BaseGridStrategy(IGridIO):
                 self.logger.log(f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - [HEDGE] skip recenter due hedge loss: pnl={hedge_pnl:.4f}", level="INFO")
                 return
 
-            try:
-                self._io_close_hedge(timestamp_ms=timestamp_ms, qty=hedge_qty, price=price, reason="RECENTER")
-                self._record_hedge_close(close_price=price, realized_pnl=hedge_pnl)
-                try:
-                    self.record_hedge_balance(timestamp_ms=timestamp_ms, current_price=price, notes="hedge_close")
-                except Exception as e:
-                    self.logger.log(f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - [HEDGE] record_hedge_balance close error: {e}", level="ERROR")
-            except Exception as e:
-                self.logger.log(f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - [HEDGE] close error during recenter: {e}", level="ERROR")
-            self.hedge_position = None
+            self._close_hedge(timestamp_ms=timestamp_ms, price=price, reason="RECENTER")
 
             # use hedge profit to rebalance spot
             try:
@@ -655,7 +889,7 @@ class BaseGridStrategy(IGridIO):
         # ===============================================================
         # 6) Hedge now requires ATR/EMA row → pass row dict
         # ===============================================================
-        # self._process_hedge(timestamp_ms, price, row)
+        self._process_hedge(timestamp_ms, price, row)
 
     # ------------------------------------------------------------------
     # BUY logic
@@ -666,7 +900,7 @@ class BaseGridStrategy(IGridIO):
         """
         # refresh available from DB (spot)
         try:
-            self._refresh_balances_from_db()
+            self._io_refresh_balances()
         except Exception as e:
             self.logger.log(f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - [BAL] refresh spot available error: {e}", level="ERROR")
 
@@ -920,9 +1154,8 @@ class BaseGridStrategy(IGridIO):
         notional = add_qty * price
         required_margin = notional / max(self.hedge_leverage, 1)
 
-        # refresh futures margin from DB
         try:
-            self._refresh_balances_from_db()
+            self._io_refresh_balances()
         except Exception as e:
             self.logger.log(f"[BAL] refresh futures available error: {e}", level="ERROR")
 
@@ -990,6 +1223,7 @@ class BaseGridStrategy(IGridIO):
     def _manage_hedge_exit(self, timestamp_ms: int, price: float, spot_unrealized: float, ema_fast: float, ema_mid: float) -> None:
         """
         ตัดสินใจปิด hedge:
+        - ถ้ามี pending_recenter และ hedge PnL >= 0 → ทำ full recenter ที่นี่เลย
         - TP: กำไร hedge ชดเชย spot loss ตาม hedge_tp_ratio
         - SL: ถ้าราคาเด้งกลับ + hedge ขาดทุนเกิน hedge_sl_ratio
         """
@@ -1003,10 +1237,57 @@ class BaseGridStrategy(IGridIO):
         # short: profit = (entry - price) * qty
         hedge_pnl = (hedge_entry - price) * hedge_qty
 
+        # ----------------------------------------------------------
+        # A) ถ้าอยู่ในโหมด "รอ recenter" จาก downtrend
+        #    และ hedge PnL >= 0 → เรียก full recenter ตรงนี้
+        # ----------------------------------------------------------
+        if self.pending_recenter is not None and hedge_pnl >= 0:
+            # ดึง ATR ล่าสุดจาก DB
+            try:
+                last = self.ohlcv_db.get_recent_ohlcv(self.symbol, 1)
+                if last is not None and not last.empty:
+                    row = last.iloc[-1].to_dict()
+                    atr_14 = float(row.get("atr_14", 0.0) or 0.0)
+                    atr_28 = float(row.get("atr_28", 0.0) or 0.0)
+                else:
+                    atr_14 = 0.0
+                    atr_28 = 0.0
+            except Exception as e:
+                self.logger.log(
+                    f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - [HEDGE] fetch ATR for recenter error: {e}",
+                    level="ERROR",
+                )
+                atr_14 = 0.0
+                atr_28 = 0.0
+
+            self.logger.log(
+                f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - [HEDGE] PnL >= 0 and pending_recenter set " f"→ trigger full recenter (pnl={hedge_pnl:.4f})",
+                level="INFO",
+            )
+
+            # full recenter นี้จะ:
+            # - ปิด hedge (ถ้า PnL ไม่ลบ)
+            # - ใช้กำไร hedge ช่วย rebalance spot
+            # - ล้าง grid เก่า + เปิด grid ใหม่
+            self._do_full_recenter(
+                timestamp_ms=timestamp_ms,
+                price=price,
+                atr_14=atr_14,
+                atr_28=atr_28,
+            )
+
+            # เคลียร์ flag เพื่อกันไม่ให้ยิงซ้ำ
+            self.pending_recenter = None
+            return
+
+        # ----------------------------------------------------------
+        # B) เงื่อนไขเดิมของ hedge: MAX_LOSS / TP / SL / REVERSAL
+        # ----------------------------------------------------------
         loss_to_cover = max(0.0, -spot_unrealized)
         max_loss_threshold = loss_to_cover * self.hedge_max_loss_ratio
         if max_loss_threshold > 0 and hedge_pnl <= -max_loss_threshold:
             self._close_hedge(timestamp_ms, price, reason="MAX_LOSS")
+            self.pending_recenter = None  # กันไม่ให้ full recenter ซ้ำ
             return
 
         # TP: hedge profit covers spot loss * hedge_tp_ratio
@@ -1027,7 +1308,8 @@ class BaseGridStrategy(IGridIO):
         sl_threshold = abs(spot_unrealized) * self.hedge_sl_ratio
 
         if reversal and hedge_pnl <= -sl_threshold < 0:
-            self._close_hedge(timestamp_ms, price, reason="SL_reversal")
+            self._close_hedge(timestamp_ms, price, reason="SL_REVERSAL")
+            self.pending_recenter = None  # กันไม่ให้ full recenter ซ้ำ
             return
 
         # Reversal cut after minimal hold if still losing
@@ -1040,6 +1322,7 @@ class BaseGridStrategy(IGridIO):
 
         if reversal and hedge_pnl < 0 and hold_ms >= self.hedge_min_hold_ms:
             self._close_hedge(timestamp_ms, price, reason="REVERSAL_CUT")
+            self.pending_recenter = None  # กันไม่ให้ full recenter ซ้ำ
             return
 
     # ------------------------------------------------------------------
@@ -1053,7 +1336,10 @@ class BaseGridStrategy(IGridIO):
         h = self.hedge_position
         qty = h["qty"]
         entry = h["entry"]
-        pnl = (entry - price) * qty  # short
+
+        hedge_notional = entry * qty
+        locked_margin = hedge_notional / max(self.hedge_leverage, 1)
+        pnl = (entry - price) * qty
 
         self._io_close_hedge(
             timestamp_ms=timestamp_ms,
@@ -1061,25 +1347,25 @@ class BaseGridStrategy(IGridIO):
             price=price,
             reason=reason,
         )
+
         if self.mode in ("backtest", "forward_test"):
-            # apply realized hedge pnl to cash so combined equity reflects it
             self.available_capital += pnl
-            self.futures_available_margin = max(0.0, self.futures_available_margin + pnl)
+            self.futures_available_margin = max(0.0, self.futures_available_margin + locked_margin + pnl)
+
+        self.hedge_position = None
+
         try:
+
             self._record_hedge_close(close_price=price, realized_pnl=pnl)
-        except Exception as e:
-            self.logger.log(f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - [HEDGE] record close error: {e}", level="ERROR")
-        try:
             self.record_hedge_balance(timestamp_ms=timestamp_ms, current_price=price, notes="hedge_close")
+
         except Exception as e:
-            self.logger.log(f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - [HEDGE] record_hedge_balance close error: {e}", level="ERROR")
+            self.logger.log(f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - [HEDGE] close error: {e}", level="ERROR")
 
         self.logger.log(
             f"Date: {util.timemstamp_ms_to_date(timestamp_ms)} - [HEDGE] CLOSE reason={reason}, qty={qty:.4f}, entry={entry:.4f}, " f"close={price:.4f}, pnl={pnl:.4f}",
             level="INFO",
         )
-
-        self.hedge_position = None
 
     # ------------------------------------------------------------------
     def _rebalance_spot_after_hedge(self, timestamp_ms: int, hedge_pnl: float, price: float) -> None:
@@ -1169,15 +1455,14 @@ class BaseGridStrategy(IGridIO):
         except Exception as e:
             self.logger.log(f"[HEDGE] close_open_orders_by_group error: {e}", level="ERROR")
 
-    def _refresh_balances_from_db(self) -> None:
+    def _refresh_balances_from_db_snapshot(self) -> None:
         """
         Refresh spot/futures available from AccountBalance latest rows.
         """
         if not hasattr(self, "acc_balance_db") or self.acc_balance_db is None:
             return
+
         # Backtest/forward_test: balances are simulated in-memory, do not read DB snapshots
-        if getattr(self, "mode", None) in ("backtest", "forward_test"):
-            return
         try:
             spot_row = self.acc_balance_db.get_latest_balance_by_type("SPOT", symbol=self.symbol)
             if spot_row:
@@ -1214,7 +1499,7 @@ class BaseGridStrategy(IGridIO):
             "record_date": record_date,
             "record_time": record_time,
             "start_balance_usdt": round(equity, 6),
-            "net_flow_usdt": 0.0,
+            "net_flow_usdt": round(realized_pnl, 6) - round(unrealized, 6),
             "realized_pnl_usdt": round(realized_pnl, 6),
             "unrealized_pnl_usdt": round(unrealized, 6),
             "fees_usdt": 0.0,
@@ -1238,7 +1523,10 @@ class BaseGridStrategy(IGridIO):
         dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
         spot_unreal = self._calc_unrealized_pnl(current_price)
         spot_value = sum(p.qty * current_price for p in self.positions)
-        hedge_unreal = 0.0
+
+        if notes == "hedge_close":
+            hedge_unreal = 0.0
+
         try:
             if self.hedge_position:
                 h = self.hedge_position
@@ -1256,7 +1544,7 @@ class BaseGridStrategy(IGridIO):
                     "record_date": dt.strftime("%Y-%m-%d"),
                     "record_time": dt.strftime("%H:%M:%S"),
                     "start_balance_usdt": round(combined_equity, 6),
-                    "net_flow_usdt": 0.0,
+                    "net_flow_usdt": round(float(self.realized_grid_profit), 6) - round(spot_unreal + hedge_unreal, 6),
                     "realized_pnl_usdt": round(float(self.realized_grid_profit), 6),
                     "unrealized_pnl_usdt": round(spot_unreal + hedge_unreal, 6),
                     "fees_usdt": 0.0,
@@ -1282,6 +1570,21 @@ class BaseGridStrategy(IGridIO):
             )
         except Exception as e:
             self.logger.log(f"[AccountBalance] record_hedge_balance error: {e}", level="ERROR")
+
+    def _get_trend_direction(self, row: dict, price: float) -> str:
+        ema_fast = float(row.get(f"ema_{self.ema_fast_period}", 0.0) or 0.0)
+        ema_mid = float(row.get(f"ema_{self.ema_mid_period}", 0.0) or 0.0)
+        ema_slow = float(row.get(f"ema_{self.ema_slow_period}", 0.0) or 0.0)
+
+        # downtrend: price < fast < mid < slow)
+        if price < ema_fast < ema_mid < ema_slow:
+            return "down"
+
+        # uptrend: price > fast > mid
+        if price > ema_fast > ema_mid:
+            return "up"
+
+        return "sideways"
 
     def _compute_dynamic_order_size(self, remaining_slots: int) -> float:
 

@@ -24,16 +24,13 @@ class BacktestGridStrategy(BaseGridStrategy):
     - DB ใช้เป็น log / record เท่านั้น
     """
 
-    def __init__(
-        self, symbol: str, symbol_future: str, initial_capital: float, grid_levels: int, atr_multiplier: float, order_size_usdt: float, reserve_ratio: float, logger: Optional[Logger] = None
-    ) -> None:
+    def __init__(self, symbol: str, symbol_future: str, initial_capital: float, grid_levels: int, atr_multiplier: float, reserve_ratio: float, logger: Optional[Logger] = None) -> None:
         super().__init__(
             symbol=symbol,
             symbol_future=symbol_future,
             initial_capital=initial_capital,
             grid_levels=grid_levels,
             atr_multiplier=atr_multiplier,
-            order_size_usdt=order_size_usdt,
             reserve_ratio=reserve_ratio,
             mode="backtest",
             logger=logger,
@@ -186,6 +183,13 @@ class BacktestGridStrategy(BaseGridStrategy):
             self.futures_db.close_hedge_order(order_id=resp.get("info", {}).get("orderId", 0), close_price=price, realized_pnl=pnl)
         except Exception as e:
             self.logger.log(f"[Live] close hedge error: {e}", level="ERROR")
+
+    def _io_refresh_balances(self) -> None:
+        # backtest/forward ใช้ snapshot จาก DB
+        try:
+            self._refresh_balances_from_db_snapshot()
+        except Exception as e:
+            self.logger.log(f"[BAL][BACKTEST] refresh balances from DB error: {e}", level="ERROR")
 
     def _mock_order(self, symbol: str, side: str, price: float, qty: float):
         now_ms = int(datetime.now().timestamp() * 1000)
