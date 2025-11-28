@@ -1,6 +1,7 @@
 # backtest_strategy.py
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import os
 from typing import Any, Dict, Optional
 
@@ -136,3 +137,187 @@ class BacktestGridStrategy(BaseGridStrategy):
             self._refresh_balances_from_db_snapshot()
         except Exception as e:
             self.logger.log(f"[BAL][BACKTEST] refresh balances from DB error: {e}", level="ERROR")
+
+    def _after_grid_sell(
+        self,
+        timestamp_ms: int,
+        pos: Position,
+        sell_price: float,
+        notional: float,
+        fee: float,
+        pnl: float,
+    ) -> None:
+        """
+        Accounting สำหรับ backtest/forward_test:
+        - update available_capital / realized_grid_profit
+        - snapshot account_balance
+        """
+        # 1) อัปเดตเงินสดและกำไรสะสม
+        self.available_capital += notional - fee
+        self.realized_grid_profit += pnl
+
+        # 2) log รูปแบบเดิม (PAPER)
+        self.logger.log(
+            f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - [PAPER] Grid SELL: "
+            f"entry={pos.entry_price}, target={pos.target_price}, sell={sell_price}, fee={fee:.4f}, "
+            f"qty={pos.qty}, pnl={pnl}, total_realized={self.realized_grid_profit}",
+            level="INFO",
+        )
+
+        # 3) snapshot ลง AccountBalance (ใช้ method เดิม)
+        self._snapshot_account_balance(
+            timestamp_ms=timestamp_ms,
+            current_price=sell_price,
+            side="SELL",
+            notes=f"SELL @ {sell_price}",
+        )
+
+    def _after_grid_buy(
+        self,
+        timestamp_ms: int,
+        grid_price: float,
+        buy_price: float,
+        qty: float,
+        notional: float,
+        fee: float,
+    ) -> None:
+        # หักเงินสดใน backtest
+        total_cost = notional + fee
+        self.available_capital = max(0.0, self.available_capital - total_cost)
+
+        # snapshot ลง AccountBalance
+        self._snapshot_account_balance(
+            timestamp_ms=timestamp_ms,
+            current_price=buy_price,
+            side="BUY",
+            notes=f"BUY @ {buy_price}",
+        )
+
+    def _refresh_balances_from_db_snapshot(self) -> None:
+        """
+        Refresh spot/futures available from AccountBalance latest rows.
+        """
+        if not hasattr(self, "acc_balance_db") or self.acc_balance_db is None:
+            return
+
+        try:
+            spot_row = self.acc_balance_db.get_latest_balance_by_type("SPOT", symbol=self.symbol)
+            if spot_row:
+                self.available_capital = float(spot_row.get("end_balance_usdt"))
+            fut_row = self.acc_balance_db.get_latest_balance_by_type("FUTURES", symbol=self.symbol_future)
+            if fut_row:
+                self.futures_available_margin = float(fut_row.get("end_balance_usdt"))
+        except Exception as e:
+            self.logger.log(f"[BAL] refresh db error: {e}", level="ERROR")
+
+    def _snapshot_account_balance(self, timestamp_ms: int, current_price: float, side: str, notes: str = "") -> None:
+        """
+        สร้าง snapshot ลง table account_balance
+        - ใช้เฉพาะ backtest/forward_test (กันไม่ให้ spam ตอน live)
+        """
+        if not self.is_paper_mode:
+            return
+
+        if not hasattr(self, "acc_balance_db") or self.acc_balance_db is None:
+            return
+
+        dt = datetime.fromtimestamp(timestamp_ms / 1000)
+        record_date = dt.strftime("%Y-%m-%d")
+        record_time = dt.strftime("%H:%M:%S")
+
+        equity = self._calc_equity(current_price)
+        unrealized = self._calc_unrealized_pnl(current_price)
+        realized_pnl = float(self.realized_grid_profit)
+        # backtest: net_flow_usdt = 0 (ไม่มีฝากถอน), fees_usdt = 0 (ถ้ายังไม่ได้คิด fee)
+        data = {
+            "account_type": "COMBINED",
+            "symbol": self.symbol,
+            "side": side,
+            "record_date": record_date,
+            "record_time": record_time,
+            "start_balance_usdt": round(equity, 6),
+            "net_flow_usdt": round(realized_pnl, 6) - round(unrealized, 6),
+            "realized_pnl_usdt": round(realized_pnl, 6),
+            "unrealized_pnl_usdt": round(unrealized, 6),
+            "fees_usdt": 0.0,
+            "end_balance_usdt": round(equity, 6),
+            "notes": notes,
+        }
+
+        try:
+            self.acc_balance_db.insert_balance(data)
+        except Exception as e:
+            self.logger.log(f"[AccountBalance] insert_balance error: {e}", level="ERROR")
+
+    def _record_hedge_balance(self, timestamp_ms: int, current_price: float, notes: str) -> None:
+        if not hasattr(self, "acc_balance_db") or self.acc_balance_db is None:
+            return
+
+        dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+        spot_unreal = self._calc_unrealized_pnl(current_price)
+        spot_value = sum(p.qty * current_price for p in self.positions)
+
+        # hedge_unreal default 0
+        hedge_unreal = 0.0
+        try:
+            if notes == "hedge_close":
+                hedge_unreal = 0.0
+            if self.hedge_position:
+                h = self.hedge_position
+                hedge_unreal = (float(h["entry"]) - float(current_price)) * float(h["qty"])
+        except Exception:
+            hedge_unreal = 0.0
+
+        combined_equity = float(self.available_capital + self.reserve_capital + spot_value + hedge_unreal)
+
+        try:
+            # SPOT snapshot
+            self.acc_balance_db.insert_balance(
+                {
+                    "account_type": "SPOT",
+                    "symbol": self.symbol,
+                    "record_date": dt.strftime("%Y-%m-%d"),
+                    "record_time": dt.strftime("%H:%M:%S"),
+                    "start_balance_usdt": round(self.available_capital + self.reserve_capital + spot_value, 6),
+                    "net_flow_usdt": 0.0,
+                    "realized_pnl_usdt": round(self.realized_grid_profit, 6),
+                    "unrealized_pnl_usdt": round(spot_unreal, 6),
+                    "fees_usdt": 0.0,
+                    "end_balance_usdt": round(self.available_capital + self.reserve_capital + spot_value, 6),
+                    "notes": notes,
+                }
+            )
+            # FUTURES snapshot
+            self.acc_balance_db.insert_balance(
+                {
+                    "account_type": "FUTURES",
+                    "symbol": self.symbol_future,
+                    "record_date": dt.strftime("%Y-%m-%d"),
+                    "record_time": dt.strftime("%H:%M:%S"),
+                    "start_balance_usdt": round(self.futures_available_margin, 6),
+                    "net_flow_usdt": 0.0,
+                    "realized_pnl_usdt": 0.0,
+                    "unrealized_pnl_usdt": round(hedge_unreal, 6),
+                    "fees_usdt": 0.0,
+                    "end_balance_usdt": round(self.futures_available_margin, 6),
+                    "notes": notes,
+                }
+            )
+            # COMBINED snapshot
+            self.acc_balance_db.insert_balance(
+                {
+                    "account_type": "COMBINED",
+                    "symbol": self.symbol,
+                    "record_date": dt.strftime("%Y-%m-%d"),
+                    "record_time": dt.strftime("%H:%M:%S"),
+                    "start_balance_usdt": round(combined_equity, 6),
+                    "net_flow_usdt": 0.0,
+                    "realized_pnl_usdt": round(self.realized_grid_profit, 6),
+                    "unrealized_pnl_usdt": round(spot_unreal + hedge_unreal, 6),
+                    "fees_usdt": 0.0,
+                    "end_balance_usdt": round(combined_equity, 6),
+                    "notes": notes,
+                }
+            )
+        except Exception as e:
+            self.logger.log(f"[AccountBalance] record_hedge_balance error: {e}", level="ERROR")

@@ -13,6 +13,13 @@ class IGridIO(ABC):
     Subclasses must implement these methods for live or backtest functionality.
     """
 
+    @property
+    def is_paper_mode(self) -> bool:
+        """
+        ใช้เช็คว่า strategy ตอนนี้อยู่ใน mode backtest/forward_test (paper trade)
+        """
+        return self.mode in ("backtest", "forward_test")
+
     @abstractmethod
     def _io_place_spot_buy(self, timestamp_ms: int, price: float, qty: float, grid_id: str) -> Dict[str, Any]:
         """
@@ -60,5 +67,66 @@ class IGridIO(ABC):
         ใช้ refresh available_capital (spot) และ futures_available_margin (futures)
         - backtest/forward: จาก DB
         - live: จาก exchange
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _after_grid_sell(
+        self,
+        timestamp_ms: int,
+        pos: Position,
+        sell_price: float,
+        notional: float,
+        fee: float,
+        pnl: float,
+    ) -> None:
+        """
+        เรียกหลังจาก _io_place_spot_sell เสร็จและคำนวณ notional/pnl แล้ว
+        - Base class: no-op
+        - BacktestGridStrategy / LiveGridStrategy จะ override เพื่อทำ accounting/logging
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _after_grid_buy(
+        self,
+        timestamp_ms: int,
+        grid_price: float,
+        buy_price: float,
+        qty: float,
+        notional: float,
+        fee: float,
+    ) -> None:
+        """
+        Called หลังจาก Grid BUY ถูก fill และสร้าง Position แล้ว
+        - Base: no-op
+        - BacktestGridStrategy: จะหัก available_capital และ snapshot
+        - LiveGridStrategy: ส่วนใหญ่จะไม่ทำอะไร (ปล่อยให้ exchange เป็น source of truth)
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _snapshot_account_balance(
+        self,
+        timestamp_ms: int,
+        current_price: float,
+        side: str,
+        notes: str = "",
+    ) -> None:
+        """
+        Backtest เท่านั้น default base ไม่ทำอะไร
+        Subclass (BacktestGridStrategy) จะ override ให้ไปเขียนลง DB
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _record_hedge_balance(
+        self,
+        timestamp_ms: int,
+        current_price: float,
+        notes: str,
+    ) -> None:
+        """
+        Default: no-op. BacktestGridStrategy/LiveGridStrategy เลือก override ได้เอง
         """
         raise NotImplementedError

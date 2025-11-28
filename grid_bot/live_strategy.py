@@ -183,3 +183,64 @@ class LiveGridStrategy(BaseGridStrategy):
             )
         except Exception as e:
             self.logger.log(f"[AccountBalance] record_hedge_balance error: {e}", level="ERROR")
+
+    def _after_grid_sell(
+        self,
+        timestamp_ms: int,
+        pos: Position,
+        sell_price: float,
+        notional: float,
+        fee: float,
+        pnl: float,
+    ) -> None:
+        """
+        Live mode:
+        - ไม่แตะต้อง available_capital / realized_grid_profit
+        - แค่ log ว่าส่ง SELL order แล้ว
+        - เรื่อง balance จริงไป sync จาก exchange ผ่าน sync_balances_to_db()
+        """
+        self.logger.log(
+            f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - [LIVE] Grid SELL order placed: "
+            f"entry={pos.entry_price}, target={pos.target_price}, sell={sell_price}, fee={fee}, notional={notional}, "
+            f"qty={pos.qty}, est_pnl≈{pnl}",
+            level="INFO",
+        )
+
+    def _after_grid_buy(
+        self,
+        timestamp_ms: int,
+        grid_price: float,
+        buy_price: float,
+        qty: float,
+        notional: float,
+        fee: float,
+    ) -> None:
+        """
+        Live mode:
+        - แนะนำไม่แตะ available_capital เลย ให้ถือว่า exchange/DB เป็น source หลัก
+        - ถ้าอยาก log เพิ่ม สามารถ log ตรงนี้ได้
+        """
+        # ตัวอย่าง: log เฉย ๆ
+        self.logger.log(
+            f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - [LIVE] Grid BUY placed @ {buy_price}, qty={qty}, fee={fee}, notional={notional}",
+            level="INFO",
+        )
+
+    def record_hedge_balance(self, timestamp_ms: int, current_price: float, notes: str) -> None:
+        """
+        Default: no-op. BacktestGridStrategy/LiveGridStrategy เลือก override ได้เอง
+        """
+        return
+
+    def _snapshot_account_balance(
+        self,
+        timestamp_ms: int,
+        current_price: float,
+        side: str,
+        notes: str = "",
+    ) -> None:
+        """
+        Backtest เท่านั้น default base ไม่ทำอะไร
+        Subclass (BacktestGridStrategy) จะ override ให้ไปเขียนลง DB
+        """
+        return

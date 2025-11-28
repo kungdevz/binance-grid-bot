@@ -462,7 +462,7 @@ class BaseGridStrategy(IGridIO):
         # ขายจาก position ที่ entry สูงก่อน (เสี่ยงสุด)
         positions_sorted = sorted(self.positions, key=lambda p: p.entry_price, reverse=True)
         new_positions: List[Position] = []
-        is_paper = self.mode in ("backtest", "forward_test")
+        is_paper = self.is_paper_mode
 
         for p in positions_sorted:
             if qty_to_sl <= 0:
@@ -585,7 +585,7 @@ class BaseGridStrategy(IGridIO):
                 )
 
         # 1) ขาย spot ที่มีกำไรทั้งหมด
-        is_paper = self.mode in ("backtest", "forward_test")
+        is_paper = self.is_paper_mode
         new_positions: List[Position] = []
 
         for p in self.positions:
@@ -729,7 +729,7 @@ class BaseGridStrategy(IGridIO):
 
         # -------- Force close remaining spot --------
         remaining_positions: List[Position] = []
-        is_paper_mode = self.mode in ("backtest", "forward_test")
+        is_paper_mode = self.is_paper_mode
         for pos in self.positions:
             try:
                 self._io_place_spot_sell(timestamp_ms=timestamp_ms, position=pos, sell_price=price)
@@ -913,8 +913,12 @@ class BaseGridStrategy(IGridIO):
                     )
                     continue
 
-                order_info = self._io_place_spot_buy(timestamp_ms=timestamp_ms, price=level_price, qty=qty, grid_id=self.grid_group_id)
-                self.available_capital = max(0.0, self.available_capital - total_cost)
+                order_info = self._io_place_spot_buy(
+                    timestamp_ms=timestamp_ms,
+                    price=level_price,
+                    qty=qty,
+                    grid_id=self.grid_group_id,
+                )
 
                 # --- คำนวณ target ตาม ATR-based spacing ---
                 # 1) ใช้ spacing ปัจจุบันที่มาจาก ATR * atr_multiplier
@@ -928,7 +932,6 @@ class BaseGridStrategy(IGridIO):
                 if not spacing:
                     spacing = level_price * 0.02
 
-                # target = entry + spacing (ATR-based)
                 target = round(level_price + spacing, 4)
 
                 pos = Position(
@@ -946,12 +949,21 @@ class BaseGridStrategy(IGridIO):
                 self.positions.append(pos)
                 self.grid_filled[level_price] = True
                 self.logger.log(
-                    f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - Grid BUY filled @ {level_price} qty={qty}, target={target}, notional={notional}, fee={fee}, remaining_cap={self.available_capital}",
+                    f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - "
+                    f"Grid BUY filled @ {level_price}, qty={qty}, "
+                    f"notional={notional}, fee={fee}, remaining_cap={self.available_capital}",
                     level="INFO",
                 )
 
-                # Snapshot account_balance (It's support only in the backtest/forward_test mode.)
-                self._snapshot_account_balance(timestamp_ms=timestamp_ms, current_price=price, side="BUY", notes=f"BUY @ {level_price}")
+                # ให้ subclass ไปจัดการ accounting/db เอง
+                self._after_grid_buy(
+                    timestamp_ms=timestamp_ms,
+                    grid_price=level_price,
+                    buy_price=level_price,
+                    qty=qty,
+                    notional=notional,
+                    fee=fee,
+                )
 
     # ------------------------------------------------------------------
     # SELL logic
@@ -971,7 +983,6 @@ class BaseGridStrategy(IGridIO):
               (ให้ไปดึงจาก exchange/DB ภายหลังเพื่อความตรง)
         """
         remaining_positions: List[Position] = []
-        is_paper_mode = self.mode in ("backtest", "forward_test")
 
         for pos in self.positions:
             # ยังไม่ถึง target → ถือไว้ต่อ
@@ -988,29 +999,8 @@ class BaseGridStrategy(IGridIO):
 
             # คำนวณ notional / fee / pnl แบบ generic
             notional = price * pos.qty
-            fee = 0.0  # TODO: จะไปดึงจาก order_info หรือ self.spot_fee ภายหลังได้
+            fee = order_info.get("fee", 0.0)
             pnl = (price - pos.entry_price) * pos.qty - fee
-
-            if is_paper_mode:
-                # backtest/forward_test → สมมติ fill ทันที
-                self.available_capital += notional - fee
-                self.realized_grid_profit += pnl
-
-                self.logger.log(
-                    f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - [PAPER] Grid SELL: entry={pos.entry_price}, "
-                    f"target={pos.target_price}, sell={price}, "
-                    f"qty={pos.qty}, pnl={pnl}, "
-                    f"total_realized={self.realized_grid_profit}",
-                    level="INFO",
-                )
-            else:
-                # live → แค่บันทึกว่าได้สั่งขายแล้ว (ให้ไปดู fill จริงจาก exchange/DB)
-                self.logger.log(
-                    f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - [LIVE] Grid SELL order placed: entry={pos.entry_price}, "
-                    f"target={pos.target_price}, sell={price}, "
-                    f"qty={pos.qty}, est_pnl≈{pnl}",
-                    level="INFO",
-                )
 
             # ----- ปลดล็อก grid level นี้ ให้เปิด BUY ใหม่ได้ -----
             try:
@@ -1021,9 +1011,15 @@ class BaseGridStrategy(IGridIO):
                     level="ERROR",
                 )
 
-            # ----- snapshot account_balance (จะทำงานเฉพาะ backtest/forward_test) -----
-            self._snapshot_account_balance(timestamp_ms=timestamp_ms, current_price=price, side="SELL", notes=f"SELL @ {price}")
-
+            # ----- snapshot account_balance -----
+            self._after_grid_sell(
+                timestamp_ms=timestamp_ms,
+                pos=pos,
+                sell_price=price,
+                notional=notional,
+                fee=fee,
+                pnl=pnl,
+            )
         # เก็บเฉพาะ positions ที่ยังไม่ถึงเป้าหมาย
         self.positions = remaining_positions
 
@@ -1201,7 +1197,7 @@ class BaseGridStrategy(IGridIO):
         )
         # snapshot combined balance for hedge open
         try:
-            self.record_hedge_balance(timestamp_ms=ts, current_price=price, notes="hedge_open")
+            self._record_hedge_balance(timestamp_ms=ts, current_price=price, notes="hedge_open")
         except Exception as e:
             self.logger.log(f"[HEDGE] record_hedge_balance open error: {e}", level="ERROR")
 
@@ -1375,7 +1371,7 @@ class BaseGridStrategy(IGridIO):
 
         positions_sorted = sorted(self.positions, key=lambda p: p.entry_price, reverse=True)
         new_positions: List[Position] = []
-        is_paper = self.mode in ("backtest", "forward_test")
+        is_paper = self.is_paper_mode
 
         for p in positions_sorted:
             if qty_to_cut <= 0:
@@ -1482,7 +1478,7 @@ class BaseGridStrategy(IGridIO):
             reason=reason,
         )
 
-        if self.mode in ("backtest", "forward_test"):
+        if self.is_paper_mode:
             self.available_capital += pnl
             self.futures_available_margin = max(0.0, self.futures_available_margin + locked_margin + pnl)
 
@@ -1491,7 +1487,7 @@ class BaseGridStrategy(IGridIO):
         try:
 
             self._record_hedge_close(close_price=price, realized_pnl=pnl)
-            self.record_hedge_balance(timestamp_ms=timestamp_ms, current_price=price, notes="hedge_close")
+            self._record_hedge_balance(timestamp_ms=timestamp_ms, current_price=price, notes="hedge_close")
 
         except Exception as e:
             self.logger.log(f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - [HEDGE] close error: {e}", level="ERROR")
@@ -1588,121 +1584,6 @@ class BaseGridStrategy(IGridIO):
             self.futures_db.close_open_orders_by_group(symbol=self.symbol_future or self.symbol, reason="HEDGE_CLOSE")
         except Exception as e:
             self.logger.log(f"[HEDGE] close_open_orders_by_group error: {e}", level="ERROR")
-
-    def _refresh_balances_from_db_snapshot(self) -> None:
-        """
-        Refresh spot/futures available from AccountBalance latest rows.
-        """
-        if not hasattr(self, "acc_balance_db") or self.acc_balance_db is None:
-            return
-
-        try:
-            spot_row = self.acc_balance_db.get_latest_balance_by_type("SPOT", symbol=self.symbol)
-            if spot_row:
-                self.available_capital = float(spot_row.get("end_balance_usdt"))
-            fut_row = self.acc_balance_db.get_latest_balance_by_type("FUTURES", symbol=self.symbol_future)
-            if fut_row:
-                self.futures_available_margin = float(fut_row.get("end_balance_usdt"))
-        except Exception as e:
-            self.logger.log(f"[BAL] refresh db error: {e}", level="ERROR")
-
-    def _snapshot_account_balance(self, timestamp_ms: int, current_price: float, side: str, notes: str = "") -> None:
-        """
-        สร้าง snapshot ลง table account_balance
-        - ใช้เฉพาะ backtest/forward_test (กันไม่ให้ spam ตอน live)
-        """
-        if self.mode not in ("backtest", "forward_test"):
-            return
-
-        if not hasattr(self, "acc_balance_db") or self.acc_balance_db is None:
-            return
-
-        dt = datetime.fromtimestamp(timestamp_ms / 1000)
-        record_date = dt.strftime("%Y-%m-%d")
-        record_time = dt.strftime("%H:%M:%S")
-
-        equity = self._calc_equity(current_price)
-        unrealized = self._calc_unrealized_pnl(current_price)
-        realized_pnl = float(self.realized_grid_profit)
-        # backtest: net_flow_usdt = 0 (ไม่มีฝากถอน), fees_usdt = 0 (ถ้ายังไม่ได้คิด fee)
-        data = {
-            "account_type": "COMBINED",
-            "symbol": self.symbol,
-            "side": side,
-            "record_date": record_date,
-            "record_time": record_time,
-            "start_balance_usdt": round(equity, 6),
-            "net_flow_usdt": round(realized_pnl, 6) - round(unrealized, 6),
-            "realized_pnl_usdt": round(realized_pnl, 6),
-            "unrealized_pnl_usdt": round(unrealized, 6),
-            "fees_usdt": 0.0,
-            "end_balance_usdt": round(equity, 6),
-            "notes": notes,
-        }
-
-        try:
-            self.acc_balance_db.insert_balance(data)
-        except Exception as e:
-            self.logger.log(f"[AccountBalance] insert_balance error: {e}", level="ERROR")
-
-    def record_hedge_balance(self, timestamp_ms: int, current_price: float, notes: str) -> None:
-        """
-        Record combined balance (spot + hedge unrealized) when hedge events occur.
-        Live strategies may override to fetch real balances; default uses in-memory figures.
-        """
-        if not hasattr(self, "acc_balance_db") or self.acc_balance_db is None:
-            return
-
-        dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
-        spot_unreal = self._calc_unrealized_pnl(current_price)
-        spot_value = sum(p.qty * current_price for p in self.positions)
-
-        if notes == "hedge_close":
-            hedge_unreal = 0.0
-
-        try:
-            if self.hedge_position:
-                h = self.hedge_position
-                hedge_unreal = (float(h["entry"]) - float(current_price)) * float(h["qty"])
-        except Exception:
-            hedge_unreal = 0.0
-
-        combined_equity = float(self.available_capital + self.reserve_capital + spot_value + hedge_unreal)
-        try:
-            # combined snapshot
-            self.acc_balance_db.insert_balance(
-                {
-                    "account_type": "COMBINED",
-                    "symbol": self.symbol,
-                    "record_date": dt.strftime("%Y-%m-%d"),
-                    "record_time": dt.strftime("%H:%M:%S"),
-                    "start_balance_usdt": round(combined_equity, 6),
-                    "net_flow_usdt": round(float(self.realized_grid_profit), 6) - round(spot_unreal + hedge_unreal, 6),
-                    "realized_pnl_usdt": round(float(self.realized_grid_profit), 6),
-                    "unrealized_pnl_usdt": round(spot_unreal + hedge_unreal, 6),
-                    "fees_usdt": 0.0,
-                    "end_balance_usdt": round(combined_equity, 6),
-                    "notes": notes,
-                }
-            )
-            # futures snapshot uses available margin
-            self.acc_balance_db.insert_balance(
-                {
-                    "account_type": "FUTURES",
-                    "symbol": self.symbol_future,
-                    "record_date": dt.strftime("%Y-%m-%d"),
-                    "record_time": dt.strftime("%H:%M:%S"),
-                    "start_balance_usdt": round(self.futures_available_margin, 6),
-                    "net_flow_usdt": 0.0,
-                    "realized_pnl_usdt": 0.0,
-                    "unrealized_pnl_usdt": round(hedge_unreal, 6),
-                    "fees_usdt": 0.0,
-                    "end_balance_usdt": round(self.futures_available_margin, 6),
-                    "notes": notes,
-                }
-            )
-        except Exception as e:
-            self.logger.log(f"[AccountBalance] record_hedge_balance error: {e}", level="ERROR")
 
     def _get_trend_direction(self, row: dict, price: float) -> str:
         ema_fast = float(row.get(f"ema_{self.ema_fast_period}", 0.0) or 0.0)
