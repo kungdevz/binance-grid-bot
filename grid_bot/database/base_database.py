@@ -1,15 +1,17 @@
 # grid_bot/database/base_repo.py
 import os
 from dotenv import load_dotenv
-from typing import Any, Dict
 from mysql.connector import pooling
+import grid_bot.utils.util as util
 
 load_dotenv()  # reads .env file from current or parent dir
+
 
 class BaseMySQLRepo:
     """
     Base class providing pooled MySQL connections with config from .env
     """
+
     _pool = None
 
     def __init__(self, **db_kwargs):
@@ -25,16 +27,12 @@ class BaseMySQLRepo:
         # Allow kwargs override (for tests or dynamic config)
         env_config.update(db_kwargs)
         self.config = env_config
+        self.util = util.Util()
 
         # Initialize connection pool once (shared)
         if not BaseMySQLRepo._pool:
-            BaseMySQLRepo._pool = pooling.MySQLConnectionPool(
-                pool_name="gridbot_pool",
-                pool_size=int(os.getenv("DB_POOL_SIZE", 5)),
-                pool_reset_session=True,
-                **self.config
-            )
+            BaseMySQLRepo._pool = pooling.MySQLConnectionPool(pool_name="gridbot_pool", pool_size=int(os.getenv("DB_POOL_SIZE", 5)), pool_reset_session=True, **self.config)
 
     def _get_conn(self):
-        """ Get pooled connection """
+        """Get pooled connection"""
         return BaseMySQLRepo._pool.get_connection()

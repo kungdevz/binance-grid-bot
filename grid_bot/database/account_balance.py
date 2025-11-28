@@ -1,6 +1,6 @@
 import mysql.connector
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from grid_bot.database.base_database import BaseMySQLRepo
 

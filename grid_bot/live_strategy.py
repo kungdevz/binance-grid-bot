@@ -54,7 +54,7 @@ class LiveGridStrategy(BaseGridStrategy):
         resp = self.exchange.place_limit_buy(self.symbol, price, qty, exchange=True)
 
         # แปลง response เป็นรูปแบบเดียวกับ SpotOrders
-        order_data = self._build_order_data(resp, grid_id)
+        order_data = self.util._build_spot_order_data(resp, grid_id)
         try:
             self.spot_orders_db.create_order(order_data)
         except Exception as e:
@@ -66,7 +66,7 @@ class LiveGridStrategy(BaseGridStrategy):
 
         qty = position.qty
         resp = self.exchange.place_limit_sell(self.symbol, sell_price, qty, exchange=True)
-        order_data = self._build_spot_order_data(resp, position.group_id)
+        order_data = self.util._build_spot_order_data(resp, position.group_id)
 
         try:
             self.spot_orders_db.create_order(order_data)

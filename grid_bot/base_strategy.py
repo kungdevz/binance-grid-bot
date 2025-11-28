@@ -548,21 +548,13 @@ class BaseGridStrategy(IGridIO):
                 target_ratio=1.0,  # hedge ประมาณ 100% ของ net spot ที่เหลือ
                 price=price,
                 net_spot_qty=remaining_qty,
-                reason="RECENTER_DOWN_TREND_HEDGE",
+                reason="SELL",
             )
         except Exception as e:
             self.logger.log(
                 f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - " f"[RECENTER_DOWN] ensure_hedge_ratio error: {e}",
                 level="ERROR",
             )
-
-        # (option) snapshot account balance ใน backtest
-        self._snapshot_account_balance(
-            timestamp_ms=timestamp_ms,
-            current_price=price,
-            side="RECENTER_DOWN",
-            notes="recenter_downtrend: SL half + hedge scale-in",
-        )
 
     def _recenter_uptrend(self, timestamp_ms: int, price: float, atr_14: float, atr_28: float) -> None:
         """
@@ -886,8 +878,7 @@ class BaseGridStrategy(IGridIO):
         # If we are in recovery_mode, do not open new BUYs
         if getattr(self, "recovery_mode", False):
             self.logger.log(
-                f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - "
-                "[RECOVERY] skip grid BUY due to recovery_mode",
+                f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - " "[RECOVERY] skip grid BUY due to recovery_mode",
                 level="INFO",
             )
             return
@@ -1252,8 +1243,7 @@ class BaseGridStrategy(IGridIO):
                 atr_28 = 0.0
 
             self.logger.log(
-                f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - "
-                f"[HEDGE] pending_recenter fulfilled, hedge_pnl={hedge_pnl:.4f} → run full recenter.",
+                f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - " f"[HEDGE] pending_recenter fulfilled, hedge_pnl={hedge_pnl:.4f} → run full recenter.",
                 level="INFO",
             )
 
@@ -1331,9 +1321,7 @@ class BaseGridStrategy(IGridIO):
         # If drawdown is still moderate -> do nothing
         if dd_ratio < self.recovery_drawdown_trigger_ratio:
             self.logger.log(
-                f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - "
-                f"[RECOVERY] hedge SL, dd_ratio={dd_ratio:.3f} < trigger="
-                f"{self.recovery_drawdown_trigger_ratio:.3f}, no recovery_mode.",
+                f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - " f"[RECOVERY] hedge SL, dd_ratio={dd_ratio:.3f} < trigger=" f"{self.recovery_drawdown_trigger_ratio:.3f}, no recovery_mode.",
                 level="INFO",
             )
             return
@@ -1342,9 +1330,7 @@ class BaseGridStrategy(IGridIO):
         if not self.recovery_mode:
             self.recovery_mode = True
             self.logger.log(
-                f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - "
-                f"[RECOVERY] ENTER recovery_mode, spot_unreal={spot_unrealized:.4f}, "
-                f"dd_ratio={dd_ratio:.3f}",
+                f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - " f"[RECOVERY] ENTER recovery_mode, spot_unreal={spot_unrealized:.4f}, " f"dd_ratio={dd_ratio:.3f}",
                 level="WARN",
             )
 
@@ -1368,9 +1354,7 @@ class BaseGridStrategy(IGridIO):
         if dd_ratio <= self.recovery_drawdown_exit_ratio:
             self.recovery_mode = False
             self.logger.log(
-                f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - "
-                f"[RECOVERY] EXIT recovery_mode, spot_unreal={spot_unreal:.4f}, "
-                f"dd_ratio={dd_ratio:.3f}",
+                f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - " f"[RECOVERY] EXIT recovery_mode, spot_unreal={spot_unreal:.4f}, " f"dd_ratio={dd_ratio:.3f}",
                 level="INFO",
             )
 
@@ -1424,8 +1408,7 @@ class BaseGridStrategy(IGridIO):
                 )
             except Exception as e:
                 self.logger.log(
-                    f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - "
-                    f"[RECOVERY] emergency SELL error: {e}",
+                    f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - " f"[RECOVERY] emergency SELL error: {e}",
                     level="ERROR",
                 )
 
@@ -1472,8 +1455,7 @@ class BaseGridStrategy(IGridIO):
         )
 
         self.logger.log(
-            f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - "
-            f"[RECOVERY] emergency partial cut qty={target_cut_qty:.4f} @ {price:.4f}",
+            f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - " f"[RECOVERY] emergency partial cut qty={target_cut_qty:.4f} @ {price:.4f}",
             level="WARN",
         )
 

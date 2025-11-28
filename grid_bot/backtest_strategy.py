@@ -2,17 +2,12 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
 
 from grid_bot.database.logger import Logger
-from grid_bot.database.spot_orders import SpotOrders
-from grid_bot.database.future_orders import FuturesOrders
-from grid_bot.utils.util import Util
-
 from .base_strategy import BaseGridStrategy, Position
 
 
@@ -111,12 +106,12 @@ class BacktestGridStrategy(BaseGridStrategy):
             self.futures_db.create_hedge_open(symbol=self.symbol_future, qty=qty, price=avg_price, leverage=self.hedge_leverage)
             return avg_price
         except Exception as e:
-            self.logger.log(f"[Live] open hedge error: {e}", level="ERROR")
+            self.logger.log(f"[BACKTEST] open hedge error: {e}", level="ERROR")
         return price
 
     def _io_close_hedge(self, timestamp_ms: int, qty: float, price: float, reason: str) -> None:
         """
-        ปิด short futures จริง (live) หรือ mock (backtest)
+        ปิด short futures จริง (BACKTEST) หรือ mock (backtest)
         """
         self.logger.log(
             f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - [HEDGE_IO] close backtest_strategy stub qty={qty:.4f} @ {price:.4f}, reason={reason}",
@@ -133,7 +128,7 @@ class BacktestGridStrategy(BaseGridStrategy):
                 pnl = 0.0
             self.futures_db.close_hedge_order(order_id=resp.get("info", {}).get("orderId", 0), close_price=price, realized_pnl=pnl)
         except Exception as e:
-            self.logger.log(f"[Live] close hedge error: {e}", level="ERROR")
+            self.logger.log(f"[BACKTEST] close hedge error: {e}", level="ERROR")
 
     def _io_refresh_balances(self) -> None:
         # backtest/forward ใช้ snapshot จาก DB

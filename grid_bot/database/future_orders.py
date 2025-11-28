@@ -1,7 +1,5 @@
-import mysql.connector
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
-import grid_bot.utils.util as util
 from grid_bot.database.base_database import BaseMySQLRepo
 
 
@@ -210,8 +208,8 @@ class FuturesOrders(BaseMySQLRepo):
         Convenience wrapper to record a hedge open.
         """
         data = {
-            "order_id": int(datetime.utcnow().timestamp() * 1000),
-            "client_order_id": util.generate_order_id("HEDGE_OPEN"),
+            "order_id": int(datetime.now().timestamp() * 1000),
+            "client_order_id": self.util.generate_order_id("HEDGE_OPEN"),
             "symbol": symbol,
             "status": "OPEN",
             "type": "LIMIT",
@@ -224,8 +222,8 @@ class FuturesOrders(BaseMySQLRepo):
             "time_in_force": "GTC",
             "stop_price": 0,
             "iceberg_qty": 0,
-            "time": int(datetime.utcnow().timestamp() * 1000),
-            "update_time": int(datetime.utcnow().timestamp() * 1000),
+            "time": int(datetime.now().timestamp() * 1000),
+            "update_time": int(datetime.now().timestamp() * 1000),
             "is_working": 1,
             "position_side": "BOTH",
             "reduce_only": 0,
