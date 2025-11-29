@@ -1,6 +1,7 @@
 from typing import Dict, List, Any
 from grid_bot.database.base_database import BaseMySQLRepo
 
+
 class GridState(BaseMySQLRepo):
     """
     Handles persistence of grid state using Mysql, with statuses and timestamps.
@@ -25,18 +26,20 @@ class GridState(BaseMySQLRepo):
                     `base_price` decimal(18, 8) NOT NULL DEFAULT '0.00000000',
                     `spacing` decimal(18, 8) NOT NULL DEFAULT '0.00000000',
                     `create_date` datetime DEFAULT CURRENT_TIMESTAMP,
-                    `update_date` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP            
-                )
+                    `update_date` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
                 """
             )
 
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT COUNT(1) FROM INFORMATION_SCHEMA.STATISTICS
                 WHERE TABLE_SCHEMA = DATABASE()
                 AND TABLE_NAME = 'grid_state'
                 AND INDEX_NAME = 'ux_grid_group_price';
-            """)
-            
+            """
+            )
+
             if cursor.fetchone()[0] == 0:
                 cursor.execute("CREATE INDEX ux_grid_group_price ON grid_state(group_id, grid_price)")
 
@@ -44,7 +47,7 @@ class GridState(BaseMySQLRepo):
             conn.commit()
             conn.close()
 
-    def load_state_with_use_flgs(self, symbol,  use_flgs: str = "Y") -> List[Dict[str, Any]]:
+    def load_state_with_use_flgs(self, symbol, use_flgs: str = "Y") -> List[Dict[str, Any]]:
         conn = self._get_conn()
         cursor = conn.cursor(dictionary=True)
         try:
@@ -91,7 +94,7 @@ class GridState(BaseMySQLRepo):
                         group_id     = VALUES(group_id),
                         create_date  = VALUES(create_date);
                 """,
-                entry
+                entry,
             )
 
             id = cursor.lastrowid
@@ -100,7 +103,6 @@ class GridState(BaseMySQLRepo):
         finally:
             cursor.close()
             conn.close()
-        
 
     def mark_filled(self, price: float) -> int:
         conn = self._get_conn()
@@ -120,8 +122,6 @@ class GridState(BaseMySQLRepo):
             cursor.close()
             conn.close()
 
-        
-
     def mark_open(self, price: float) -> int:
         conn = self._get_conn()
         cursor = conn.cursor()
@@ -140,7 +140,6 @@ class GridState(BaseMySQLRepo):
             cursor.close()
             conn.close()
 
-
     def cancel_all_open(self) -> int:
         conn = self._get_conn()
         cursor = conn.cursor()
@@ -156,7 +155,6 @@ class GridState(BaseMySQLRepo):
         finally:
             cursor.close()
             conn.close()
-
 
     def delete_all_states(self) -> int:
         conn = self._get_conn()

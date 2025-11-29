@@ -4,7 +4,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 import pandas as pd
-import numpy as np
 
 from grid_bot.interface.io_interface import IGridIO
 from grid_bot.database.grid_states import GridState
@@ -12,10 +11,11 @@ from grid_bot.database.ohlcv_data import OhlcvData
 from grid_bot.database.spot_orders import SpotOrders
 from grid_bot.database.future_orders import FuturesOrders
 from grid_bot.database.account_balance import AccountBalance
+from grid_bot.database.spot_position import SpotPosition
 from grid_bot.database.logger import Logger
 
 from grid_bot.strategy.atr_calculator import ATRCalculator as atr_calc
-from grid_bot.datas.position import Position
+from grid_bot.dataclass.position import Position
 from grid_bot.utils.util import Util
 
 
@@ -105,6 +105,7 @@ class BaseGridStrategy(IGridIO):
         self.spot_orders_db = SpotOrders()
         self.futures_db = FuturesOrders()
         self.acc_balance_db = AccountBalance()
+        self.spot_positions_db = SpotPosition()
 
         self.logger = Logger()
         self.util = Util()
@@ -948,14 +949,9 @@ class BaseGridStrategy(IGridIO):
 
                 self.positions.append(pos)
                 self.grid_filled[level_price] = True
-                self.logger.log(
-                    f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - "
-                    f"Grid BUY filled @ {level_price}, qty={qty}, "
-                    f"notional={notional}, fee={fee}, remaining_cap={self.available_capital}",
-                    level="INFO",
-                )
 
-                # ให้ subclass ไปจัดการ accounting/db เอง
+                # ให้ subclass ไปจัดการ accounting/db เองก่อน (backtest จะหักเงินสดตรงนี้)
+                before_cap = self.available_capital
                 self._after_grid_buy(
                     timestamp_ms=timestamp_ms,
                     grid_price=level_price,
@@ -963,6 +959,16 @@ class BaseGridStrategy(IGridIO):
                     qty=qty,
                     notional=notional,
                     fee=fee,
+                )
+
+                self._on_position_open(pos, order_ctx=order_info)
+
+                # log หลังจากหักเงินแล้ว
+                self.logger.log(
+                    f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - "
+                    f"Grid BUY filled @ {level_price}, qty={qty}, "
+                    f"notional={notional}, fee={fee}, cap_before={before_cap}, cap_after={self.available_capital}",
+                    level="INFO",
                 )
 
     # ------------------------------------------------------------------
@@ -1020,27 +1026,18 @@ class BaseGridStrategy(IGridIO):
                 fee=fee,
                 pnl=pnl,
             )
+
+            # persist close
+            self._on_position_close(
+                pos=pos,
+                close_price=price,
+                realized_pnl=pnl,
+                fee_close=fee,
+                order_ctx=order_info,
+            )
+
         # เก็บเฉพาะ positions ที่ยังไม่ถึงเป้าหมาย
         self.positions = remaining_positions
-
-    def _calc_unrealized_pnl(self, current_price: float) -> float:
-        """
-        รวม unrealized PnL ของ spot positions ทั้งหมด ณ ราคา current_price
-        """
-        pnl = 0.0
-        for p in self.positions:
-            pnl += (current_price - p.entry_price) * p.qty
-        return float(pnl)
-
-    def _calc_equity(self, current_price: float) -> float:
-        """
-        Equity = เงินสด (available + reserve) + มูลค่าตลาดของ position ทั้งหมด
-        """
-        cash = float(self.available_capital + self.reserve_capital)
-        pos_value = 0.0
-        for p in self.positions:
-            pos_value += p.qty * current_price
-        return cash + pos_value
 
     # ==================================================================
     #   HEDGE LOGIC (EMA + ZONE)
@@ -1616,3 +1613,22 @@ class BaseGridStrategy(IGridIO):
         order_size_usdt = max(min_order_usdt, raw_size)
 
         return order_size_usdt
+
+    def _calc_unrealized_pnl(self, current_price: float) -> float:
+        """
+        รวม unrealized PnL ของ spot positions ทั้งหมด ณ ราคา current_price
+        """
+        pnl = 0.0
+        for p in self.positions:
+            pnl += (current_price - p.entry_price) * p.qty
+        return float(pnl)
+
+    def _calc_equity(self, current_price: float) -> float:
+        """
+        Equity = เงินสด (available + reserve) + มูลค่าตลาดของ position ทั้งหมด
+        """
+        cash = float(self.available_capital + self.reserve_capital)
+        pos_value = 0.0
+        for p in self.positions:
+            pos_value += p.qty * current_price
+        return cash + pos_value

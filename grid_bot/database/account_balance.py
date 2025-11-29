@@ -34,7 +34,7 @@ class AccountBalance(BaseMySQLRepo):
                     `fees_usdt` DECIMAL(18,6) DEFAULT 0,              -- ค่าธรรมเนียมทั้งหมด (USDT)
                     `end_balance_usdt` DECIMAL(18,6) NOT NULL,        -- ยอดเงินสุดท้าย (USDT)
                     `notes` TEXT                                      -- หมายเหตุ (เช่น เปิด/ปิด hedge, ปรับ grid spacing)
-                )
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
                 """
             )
 

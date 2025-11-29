@@ -59,7 +59,7 @@ class SpotOrders(BaseMySQLRepo):
                     INDEX idx_spot_orders_grid_id (grid_id),
                     INDEX idx_spot_orders_order_id (order_id),
                     INDEX idx_spot_orders_created_at (created_at)
-                )
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
             """
             )
 
@@ -102,10 +102,7 @@ class SpotOrders(BaseMySQLRepo):
         conn = self._get_conn()
         cursor = conn.cursor()
         try:
-            cursor.execute(
-                f"INSERT INTO spot_orders ({', '.join(cols)}) VALUES ({placeholders})",
-                values
-            )
+            cursor.execute(f"INSERT INTO spot_orders ({', '.join(cols)}) VALUES ({placeholders})", values)
             row_id = cursor.lastrowid
             conn.commit()
             return row_id
@@ -113,22 +110,19 @@ class SpotOrders(BaseMySQLRepo):
             cursor.close()
             conn.close()
 
-
     def get_order(self, order_id: str) -> Optional[Dict[str, Any]]:
         """Fetch a single spot order by Binance order_id."""
 
         conn = self._get_conn()
         cursor = conn.cursor()
         try:
-            cursor.execute(
-                "SELECT * FROM spot_orders WHERE order_id = %s", (order_id,)
-            )
+            cursor.execute("SELECT * FROM spot_orders WHERE order_id = %s", (order_id,))
             row = cursor.fetchone()
             if not row:
                 return None
 
             columns = [col[0] for col in cursor.description]
-        
+
             return dict(zip(columns, row))
         finally:
             cursor.close()
@@ -141,14 +135,15 @@ class SpotOrders(BaseMySQLRepo):
         cursor = conn.cursor()
         try:
             cursor.execute(
-                "SELECT * FROM spot_orders WHERE grid_id = %s AND price = %s", (grid_id, price),
+                "SELECT * FROM spot_orders WHERE grid_id = %s AND price = %s",
+                (grid_id, price),
             )
             row = cursor.fetchone()
             if not row:
                 return None
 
             columns = [col[0] for col in cursor.description]
-            
+
             return dict(zip(columns, row))
         finally:
             cursor.close()
@@ -156,10 +151,10 @@ class SpotOrders(BaseMySQLRepo):
 
     def list_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         """List all spot orders, optionally filtered by symbol."""
-        
+
         conn = self._get_conn()
         cursor = conn.cursor()
-        try: 
+        try:
             if symbol:
                 cursor.execute(
                     "SELECT * FROM spot_orders WHERE symbol = %s ORDER BY binance_time",
@@ -223,9 +218,7 @@ class SpotOrders(BaseMySQLRepo):
         """Delete a spot order by Binance order_id."""
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM spot_orders WHERE order_id = %s", (order_id,)
-        )
+        cursor.execute("DELETE FROM spot_orders WHERE order_id = %s", (order_id,))
         conn.commit()
         cursor.close()
         conn.close()

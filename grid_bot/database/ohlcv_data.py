@@ -3,6 +3,7 @@ import pandas as pd
 
 from grid_bot.database.base_database import BaseMySQLRepo
 
+
 class OhlcvData(BaseMySQLRepo):
 
     def __init__(self):
@@ -11,7 +12,8 @@ class OhlcvData(BaseMySQLRepo):
         cursor = conn.cursor()
 
         try:
-            cursor.execute("""
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS ohlcv_data (
                     symbol        VARCHAR(20)   NOT NULL,
                     timestamp     BIGINT        NOT NULL,
@@ -29,21 +31,24 @@ class OhlcvData(BaseMySQLRepo):
                     ema_100       DOUBLE        NOT NULL,
                     ema_200       DOUBLE        NOT NULL,
                     PRIMARY KEY (symbol, timestamp)
-                )
-            """)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """
+            )
 
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT COUNT(1) FROM INFORMATION_SCHEMA.STATISTICS
                 WHERE TABLE_SCHEMA = DATABASE()
                 AND TABLE_NAME = 'ohlcv_data'
                 AND INDEX_NAME = 'idx_ohlcv_data';
-            """)
-            
+            """
+            )
+
             if cursor.fetchone()[0] == 0:
                 cursor.execute("CREATE INDEX idx_ohlcv_data ON ohlcv_data(timestamp, symbol)")
-            
+
             conn.commit()
-            
+
         finally:
             cursor.close()
             conn.close()
@@ -102,7 +107,7 @@ class OhlcvData(BaseMySQLRepo):
         conn = self._get_conn()
         cursor = conn.cursor()
 
-        delete_sql = 'DELETE FROM ohlcv_data WHERE symbol = %s AND timestamp = %s'
+        delete_sql = "DELETE FROM ohlcv_data WHERE symbol = %s AND timestamp = %s"
         try:
             cursor.execute(delete_sql, (symbol, timestamp))
 
@@ -117,7 +122,7 @@ class OhlcvData(BaseMySQLRepo):
         conn = self._get_conn()
         cursor = conn.cursor()
 
-        delete_sql = 'DELETE FROM ohlcv_data WHERE symbol = %s AND timestamp < %s'
+        delete_sql = "DELETE FROM ohlcv_data WHERE symbol = %s AND timestamp < %s"
         try:
             cursor.execute(delete_sql, (symbol, timestamp))
 
@@ -127,12 +132,12 @@ class OhlcvData(BaseMySQLRepo):
         finally:
             cursor.close()
             conn.close()
-    
+
     def delete_ohlcv_by_symbol(self, symbol: str) -> int:
         conn = self._get_conn()
         cursor = conn.cursor()
 
-        delete_sql = 'DELETE FROM ohlcv_data WHERE symbol = %s'
+        delete_sql = "DELETE FROM ohlcv_data WHERE symbol = %s"
 
         try:
             cursor.execute(delete_sql, (symbol,))
@@ -142,19 +147,19 @@ class OhlcvData(BaseMySQLRepo):
         finally:
             cursor.close()
             conn.close()
-    
+
     def get_recent_ohlcv_by_timestamp(self, symbol: str, timestamp: int, limit: int = 100) -> List[Dict[str, Any]]:
         conn = self._get_conn()
         cursor = conn.cursor()
-        query = '''
-            SELECT symbol, timestamp, `open`, high, low, close, volume, 
+        query = """
+            SELECT symbol, timestamp, `open`, high, low, close, volume,
                 tr, atr_14, atr_28, ema_14, ema_28, ema_50, ema_100, ema_200
             FROM ohlcv_data
             WHERE symbol = %s AND timestamp <= %s
             ORDER BY timestamp DESC
             LIMIT %s
-        '''
-        try:   
+        """
+        try:
             cursor.execute(query, (symbol, timestamp, limit))
             rows = cursor.fetchall()
             columns = [col[0] for col in cursor.description]
@@ -167,17 +172,15 @@ class OhlcvData(BaseMySQLRepo):
         conn = self._get_conn()
         cursor = conn.cursor(dictionary=True)
 
-        query = '''
+        query = """
             SELECT * FROM ohlcv_data
             WHERE symbol = %s
             ORDER BY timestamp DESC
             LIMIT %s
-        '''
+        """
 
         try:
-            cursor.execute(
-                query, (symbol, limit)
-            )
+            cursor.execute(query, (symbol, limit))
             rows = cursor.fetchall()
             # Convert to DataFrame
             columns = [desc[0] for desc in cursor.description]  # get column names

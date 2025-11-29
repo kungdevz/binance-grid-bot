@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 import os
 from typing import Any, Dict, Optional
 
-import numpy as np
 import pandas as pd
 
 from grid_bot.database.logger import Logger
@@ -33,6 +32,27 @@ class BacktestGridStrategy(BaseGridStrategy):
         )
 
         self.logger.log("[BacktestGridStrategy] initialized", level="INFO")
+
+    # main backtest loop
+    def _run(self, file_path: Optional[str] = None) -> None:
+        """
+        Execute a backtest over a CSV OHLCV file.
+        If file_path is None, fall back to env OHLCV_FILE.
+        """
+        file_path = file_path or os.getenv("OHLCV_FILE")
+        if not file_path or not os.path.exists(file_path):
+            raise ValueError("OHLCV_FILE must be set in env or config for backtest and point to an existing file")
+
+        self.logger.log(f"Loading OHLCV data from {file_path}", level="INFO")
+        df = pd.read_csv(file_path, parse_dates=["Time"])
+        df.rename(columns={"Time": "time", "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"}, inplace=True)
+        df.set_index("time", inplace=True)
+        df_history = df.iloc[:100]
+
+        for idx, row in df.iloc[100:].iterrows():
+            ts = int(idx.value // 10**6)  # Timestamp → ms
+            self.on_bar(ts, float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]), float(row["volume"]), df_history)
+        return None
 
     # ------------------------------------------------------------------
     # implement abstract I/O
@@ -75,26 +95,6 @@ class BacktestGridStrategy(BaseGridStrategy):
 
         return data
 
-    def _run(self, file_path: Optional[str] = None) -> None:
-        """
-        Execute a backtest over a CSV OHLCV file.
-        If file_path is None, fall back to env OHLCV_FILE.
-        """
-        file_path = file_path or os.getenv("OHLCV_FILE")
-        if not file_path or not os.path.exists(file_path):
-            raise ValueError("OHLCV_FILE must be set in env or config for backtest and point to an existing file")
-
-        self.logger.log(f"Loading OHLCV data from {file_path}", level="INFO")
-        df = pd.read_csv(file_path, parse_dates=["Time"])
-        df.rename(columns={"Time": "time", "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"}, inplace=True)
-        df.set_index("time", inplace=True)
-        df_history = df.iloc[:100]
-
-        for idx, row in df.iloc[100:].iterrows():
-            ts = int(idx.value // 10**6)  # Timestamp → ms
-            self.on_bar(ts, float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]), float(row["volume"]), df_history)
-        return None
-
     def _io_open_hedge_short(self, timestamp_ms: int, qty: float, price: float, reason: str) -> Optional[float]:
         """
         เปิด short futures จริง (live) หรือ mock (backtest)
@@ -132,11 +132,32 @@ class BacktestGridStrategy(BaseGridStrategy):
             self.logger.log(f"[BACKTEST] close hedge error: {e}", level="ERROR")
 
     def _io_refresh_balances(self) -> None:
-        # backtest/forward ใช้ snapshot จาก DB
+        """
+        Backtest/forward_test:
+        - ไม่ดึง balance จาก DB มา overwrite ค่าใน memory
+        - ปล่อยให้ in-memory accounting จาก _after_grid_buy/_after_grid_sell,
+          hedge/recenter เป็น source of truth หลัก
+        - DB ใช้เพื่อ log / วิเคราะห์ย้อนหลังเท่านั้น
+        """
+        return
+        # ถ้าอนาคตอยากใช้ DB สำหรับ forward_test จริง ๆ
+        # ค่อยมาเพิ่ม branch เช่น
+        # if self.mode == "forward_test":
+        #     self._refresh_balances_from_db_snapshot()
+
+    def _refresh_balances_from_db_snapshot(self) -> None:
+        if not hasattr(self, "acc_balance_db") or self.acc_balance_db is None:
+            return
+
         try:
-            self._refresh_balances_from_db_snapshot()
+            spot_row = self.acc_balance_db.get_latest_balance_by_type("SPOT", symbol=self.symbol)
+            if spot_row:
+                self.available_capital = float(spot_row.get("end_balance_usdt"))
+            fut_row = self.acc_balance_db.get_latest_balance_by_type("FUTURES", symbol=self.symbol_future)
+            if fut_row:
+                self.futures_available_margin = float(fut_row.get("end_balance_usdt"))
         except Exception as e:
-            self.logger.log(f"[BAL][BACKTEST] refresh balances from DB error: {e}", level="ERROR")
+            self.logger.log(f"[BAL] refresh db error: {e}", level="ERROR")
 
     def _after_grid_sell(
         self,
@@ -193,23 +214,6 @@ class BacktestGridStrategy(BaseGridStrategy):
             notes=f"BUY @ {buy_price}",
         )
 
-    def _refresh_balances_from_db_snapshot(self) -> None:
-        """
-        Refresh spot/futures available from AccountBalance latest rows.
-        """
-        if not hasattr(self, "acc_balance_db") or self.acc_balance_db is None:
-            return
-
-        try:
-            spot_row = self.acc_balance_db.get_latest_balance_by_type("SPOT", symbol=self.symbol)
-            if spot_row:
-                self.available_capital = float(spot_row.get("end_balance_usdt"))
-            fut_row = self.acc_balance_db.get_latest_balance_by_type("FUTURES", symbol=self.symbol_future)
-            if fut_row:
-                self.futures_available_margin = float(fut_row.get("end_balance_usdt"))
-        except Exception as e:
-            self.logger.log(f"[BAL] refresh db error: {e}", level="ERROR")
-
     def _snapshot_account_balance(self, timestamp_ms: int, current_price: float, side: str, notes: str = "") -> None:
         """
         สร้าง snapshot ลง table account_balance
@@ -254,6 +258,7 @@ class BacktestGridStrategy(BaseGridStrategy):
             return
 
         dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+
         spot_unreal = self._calc_unrealized_pnl(current_price)
         spot_value = sum(p.qty * current_price for p in self.positions)
 
@@ -265,10 +270,17 @@ class BacktestGridStrategy(BaseGridStrategy):
             if self.hedge_position:
                 h = self.hedge_position
                 hedge_unreal = (float(h["entry"]) - float(current_price)) * float(h["qty"])
-        except Exception:
-            hedge_unreal = 0.0
+        except Exception as e:
+            self.logger.log(f"[AccountBalance] calc hedge_unreal error: {e}", level="ERROR")
 
-        combined_equity = float(self.available_capital + self.reserve_capital + spot_value + hedge_unreal)
+        # SPOT equity = เงินสด (avail+reserve) + มูลค่า spot positions
+        spot_equity = self.available_capital + self.reserve_capital + spot_value
+
+        # FUTURES equity (approx) = futures_available_margin + hedge_unreal
+        futures_equity = self.futures_available_margin + hedge_unreal
+
+        # COMBINED equity = spot + futures
+        combined_equity = spot_equity + futures_equity
 
         try:
             # SPOT snapshot
@@ -278,15 +290,18 @@ class BacktestGridStrategy(BaseGridStrategy):
                     "symbol": self.symbol,
                     "record_date": dt.strftime("%Y-%m-%d"),
                     "record_time": dt.strftime("%H:%M:%S"),
-                    "start_balance_usdt": round(self.available_capital + self.reserve_capital + spot_value, 6),
+                    # total equity ของ spot wallet (cash + reserve + มูลค่า spot)
+                    "start_balance_usdt": round(spot_equity, 6),
                     "net_flow_usdt": 0.0,
                     "realized_pnl_usdt": round(self.realized_grid_profit, 6),
                     "unrealized_pnl_usdt": round(spot_unreal, 6),
                     "fees_usdt": 0.0,
-                    "end_balance_usdt": round(self.available_capital + self.reserve_capital + spot_value, 6),
+                    # available = เงินสดที่ grid ใช้ได้จริง (ไม่รวม reserve, ไม่รวม inventory)
+                    "end_balance_usdt": round(self.available_capital, 6),
                     "notes": notes,
                 }
             )
+
             # FUTURES snapshot
             self.acc_balance_db.insert_balance(
                 {
@@ -294,15 +309,18 @@ class BacktestGridStrategy(BaseGridStrategy):
                     "symbol": self.symbol_future,
                     "record_date": dt.strftime("%Y-%m-%d"),
                     "record_time": dt.strftime("%H:%M:%S"),
-                    "start_balance_usdt": round(self.futures_available_margin, 6),
+                    # total equity (approx) ของ futures wallet
+                    "start_balance_usdt": round(futures_equity, 6),
                     "net_flow_usdt": 0.0,
                     "realized_pnl_usdt": 0.0,
                     "unrealized_pnl_usdt": round(hedge_unreal, 6),
                     "fees_usdt": 0.0,
+                    # available = margin ที่ยังว่าง
                     "end_balance_usdt": round(self.futures_available_margin, 6),
                     "notes": notes,
                 }
             )
+
             # COMBINED snapshot
             self.acc_balance_db.insert_balance(
                 {
@@ -315,9 +333,55 @@ class BacktestGridStrategy(BaseGridStrategy):
                     "realized_pnl_usdt": round(self.realized_grid_profit, 6),
                     "unrealized_pnl_usdt": round(spot_unreal + hedge_unreal, 6),
                     "fees_usdt": 0.0,
+                    # สำหรับ combined เก็บ end_balance_usdt = equity รวมไปเลยก็ได้
                     "end_balance_usdt": round(combined_equity, 6),
                     "notes": notes,
                 }
             )
         except Exception as e:
             self.logger.log(f"[AccountBalance] record_hedge_balance error: {e}", level="ERROR")
+
+    def _on_position_open(self, pos: Position, order_ctx: dict | None = None) -> None:
+        data = {
+            "env": self.mode,
+            "symbol": pos.symbol,
+            "side": pos.side,
+            "status": "OPEN",
+            "entry_price": pos.entry_price,
+            "qty_opened": pos.qty,
+            "qty_open": pos.qty,
+            "grid_price": pos.grid_price,
+            "target_price": pos.target_price,
+            "closed_price": None,
+            "opened_at_ms": pos.opened_at,
+            "closed_at_ms": None,
+            "grid_group_id": pos.group_id,
+            "spot_open_order_id": pos.open_order_id,  # backtest ไม่มีของจริง
+            "spot_close_order_id": pos.close_order_id,
+            "spot_open_order_row_id": pos.open_order_row_id,
+            "spot_close_order_row_id": pos.close_order_row_id,
+            "realized_pnl_usdt": pos.realized_pnl,
+            "fee_open_usdt": order_ctx.get("fee", 0.0) if order_ctx else 0.0,
+            "fee_close_usdt": order_ctx.get("fee_close", 0.0) if order_ctx else 0.0,
+            "hedged": 1 if pos.hedged else 0,
+            "meta_json": "",
+        }
+        pos_id = self.spot_positions_db.create_position(data)
+        pos.db_id = pos_id
+
+    def _on_position_close(self, pos: Position, close_price: float, realized_pnl: float, fee_close: float, order_ctx: dict | None = None) -> None:
+        if pos.db_id is None:
+            return
+        self.spot_positions_db.close_position(
+            position_id=pos.db_id,
+            data={
+                "status": "CLOSED",
+                "qty_open": 0.0,
+                "closed_price": close_price,
+                "closed_at_ms": int(datetime.now().timestamp() * 1000),
+                "realized_pnl_usdt": realized_pnl,
+                "fee_close_usdt": fee_close,
+                "spot_close_order_id": None,
+                "spot_close_order_row_id": None,
+            },
+        )

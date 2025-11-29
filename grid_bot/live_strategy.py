@@ -24,7 +24,6 @@ class LiveGridStrategy(BaseGridStrategy):
         initial_capital: float,
         grid_levels: int,
         atr_multiplier: float,
-        order_size_usdt: float,
         reserve_ratio: float,
         logger: Optional[Logger] = None,
     ) -> None:
@@ -51,8 +50,7 @@ class LiveGridStrategy(BaseGridStrategy):
         """
         ยิง limit buy จริงผ่าน ExchangeSync แล้วเขียน DB
         """
-        resp = self.exchange.place_limit_buy(self.symbol, price, qty, exchange=True)
-
+        resp = self.exchange.place_limit_buy(self.symbol, price, qty)
         # แปลง response เป็นรูปแบบเดียวกับ SpotOrders
         order_data = self.util._build_spot_order_data(resp, grid_id)
         try:
@@ -65,7 +63,7 @@ class LiveGridStrategy(BaseGridStrategy):
     def _io_place_spot_sell(self, timestamp_ms: int, position: Position, sell_price: float) -> Dict[str, Any]:
 
         qty = position.qty
-        resp = self.exchange.place_limit_sell(self.symbol, sell_price, qty, exchange=True)
+        resp = self.exchange.place_limit_sell(self.symbol, sell_price, qty)
         order_data = self.util._build_spot_order_data(resp, position.group_id)
 
         try:
@@ -78,7 +76,7 @@ class LiveGridStrategy(BaseGridStrategy):
     def _io_open_hedge_short(self, timestamp_ms: int, qty: float, price: float, reason: str) -> Optional[float]:
         self.logger.log(f"[HEDGE_IO] open short live_strategy qty={qty:.4f} @ {price:.4f}, reason={reason}", level="DEBUG")
         try:
-            resp = self.exchange.place_futures_short(self.symbol_future, price, qty, leverage=self.hedge_leverage, exchange=True)
+            resp = self.exchange.place_futures_short(self.symbol_future, price, qty, leverage=self.hedge_leverage)
             avg_price = float(resp.get("info", {}).get("price", price)) if isinstance(resp, dict) else price
             self.futures_db.create_hedge_open(symbol=self.symbol_future, qty=qty, price=avg_price, leverage=self.hedge_leverage)
             return avg_price
@@ -88,7 +86,7 @@ class LiveGridStrategy(BaseGridStrategy):
 
     def _io_close_hedge(self, timestamp_ms: int, qty: float, price: float, reason: str) -> None:
         try:
-            resp = self.exchange.close_futures_position(self.symbol_future, qty=qty, price=price, exchange=True)
+            resp = self.exchange.close_futures_position(self.symbol_future, qty=qty, price=price)
             pnl = 0.0
             try:
                 info = resp.get("info", {})
@@ -108,7 +106,6 @@ class LiveGridStrategy(BaseGridStrategy):
         self.logger.log("[Live] _run is not implemented; feed candles via on_bar/on_candle", level="INFO")
 
     def _io_refresh_balances(self) -> None:
-        # live ใช้ exchange เป็น source หลัก
         self.sync_balances_to_db()
 
     # Balance sync
@@ -133,7 +130,7 @@ class LiveGridStrategy(BaseGridStrategy):
         except Exception as e:
             self.logger.log(f"[BAL] sync futures error: {e}", level="ERROR")
 
-    def record_hedge_balance(self, timestamp_ms: int, current_price: float, notes: str) -> None:
+    def _record_hedge_balance(self, timestamp_ms: int, current_price: float, notes: str) -> None:
         """
         Fetch live balances and persist combined snapshot during hedge events.
         """
@@ -220,17 +217,10 @@ class LiveGridStrategy(BaseGridStrategy):
         - แนะนำไม่แตะ available_capital เลย ให้ถือว่า exchange/DB เป็น source หลัก
         - ถ้าอยาก log เพิ่ม สามารถ log ตรงนี้ได้
         """
-        # ตัวอย่าง: log เฉย ๆ
         self.logger.log(
-            f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - [LIVE] Grid BUY placed @ {buy_price}, qty={qty}, fee={fee}, notional={notional}",
+            f"Date: {self.util.timemstamp_ms_to_date(timestamp_ms)} - [LIVE] Grid : BUY placed @ {buy_price}, qty={qty}, fee={fee}, notional={notional}",
             level="INFO",
         )
-
-    def record_hedge_balance(self, timestamp_ms: int, current_price: float, notes: str) -> None:
-        """
-        Default: no-op. BacktestGridStrategy/LiveGridStrategy เลือก override ได้เอง
-        """
-        return
 
     def _snapshot_account_balance(
         self,
@@ -240,7 +230,61 @@ class LiveGridStrategy(BaseGridStrategy):
         notes: str = "",
     ) -> None:
         """
-        Backtest เท่านั้น default base ไม่ทำอะไร
+        Backtest เท่านั้น default base Live mode จะไม่ทำอะไร
         Subclass (BacktestGridStrategy) จะ override ให้ไปเขียนลง DB
         """
         return
+
+    def _on_position_open(self, pos: Position, order_ctx: dict | None = None) -> None:
+        fee_open = order_ctx.get("fee", 0.0) if order_ctx else 0.0
+        open_order_id = order_ctx.get("order_id") if order_ctx else None
+        open_order_row_id = order_ctx.get("order_row_id") if order_ctx else None
+
+        data = {
+            "env": self.mode,
+            "symbol": pos.symbol,
+            "side": pos.side,
+            "status": "OPEN",
+            "entry_price": pos.entry_price,
+            "qty_opened": pos.qty,
+            "qty_open": pos.qty,
+            "grid_price": pos.grid_price,
+            "target_price": pos.target_price,
+            "closed_price": None,
+            "opened_at_ms": pos.opened_at,
+            "closed_at_ms": None,
+            "grid_group_id": pos.group_id,
+            "spot_open_order_id": open_order_id,
+            "spot_close_order_id": None,
+            "spot_open_order_row_id": open_order_row_id,
+            "spot_close_order_row_id": None,
+            "realized_pnl_usdt": 0.0,
+            "fee_open_usdt": fee_open,
+            "fee_close_usdt": 0.0,
+            "hedged": 1 if pos.hedged else 0,
+            "meta_json": None,
+        }
+        pos_id = self.spot_positions_db.create_position(data)
+        pos.db_id = pos_id
+        pos.open_order_id = open_order_id
+        pos.open_order_row_id = open_order_row_id
+
+    def _on_position_close(self, pos: Position, close_price: float, realized_pnl: float, fee_close: float, order_ctx: dict | None = None) -> None:
+        if pos.db_id is None:
+            return
+        close_order_id = order_ctx.get("order_id") if order_ctx else None
+        close_order_row_id = order_ctx.get("order_row_id") if order_ctx else None
+
+        self.spot_positions_db.close_position(
+            position_id=pos.db_id,
+            data={
+                "status": "CLOSED",
+                "qty_open": 0.0,
+                "closed_price": close_price,
+                "closed_at_ms": self._current_ts,  # ใส่ timestamp ปัจจุบัน
+                "realized_pnl_usdt": realized_pnl,
+                "fee_close_usdt": fee_close,
+                "spot_close_order_id": close_order_id,
+                "spot_close_order_row_id": close_order_row_id,
+            },
+        )

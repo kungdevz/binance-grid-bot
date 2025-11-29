@@ -19,10 +19,10 @@ async def main():
         bt = BacktestGridStrategy(
             symbol=spot_symbol,
             symbol_future=futures_symbol,
-            initial_capital=1000,
-            grid_levels=10,
-            atr_multiplier=1.0,
-            reserve_ratio=0.3,
+            initial_capital=float(os.getenv("INITIAL_CAPITAL", 0) or 0),
+            grid_levels=int(os.getenv("GRID_LEVELS", 5)),
+            atr_multiplier=float(os.getenv("ATR_MULTIPLIER", 1.0)),
+            reserve_ratio=float(os.getenv("RESERVE_RATIO", 0.3)),
             logger=logger,
         )
         file_path = os.getenv("OHLCV_FILE")
@@ -36,7 +36,6 @@ async def main():
             initial_capital=float(os.getenv("INITIAL_CAPITAL", 0) or 0),
             grid_levels=int(os.getenv("GRID_LEVELS", 5)),
             atr_multiplier=float(os.getenv("ATR_MULTIPLIER", 1.0)),
-            order_size_usdt=float(os.getenv("ORDER_SIZE_USDT", 10)),
             reserve_ratio=float(os.getenv("RESERVE_RATIO", 0.3)),
             logger=logger,
         )

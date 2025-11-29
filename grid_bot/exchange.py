@@ -82,21 +82,21 @@ class ExchangeSync:
     def fetch_open_orders(self) -> List[Dict[str, Any]]:
         return self.spot.fetch_open_orders(self.symbol_spot)
 
-    def place_limit_buy(self, symbol: str, price: float, qty: float, exchange: bool) -> Any:
+    def place_limit_buy(self, symbol: str, price: float, qty: float) -> Any:
         return self.spot.create_order(symbol, "limit", "buy", qty, price)
 
-    def place_limit_sell(self, symbol: str, price: float, qty: float, exchange: bool) -> Any:
+    def place_limit_sell(self, symbol: str, price: float, qty: float) -> Any:
         return self.spot.create_order(symbol, "limit", "sell", qty, price)
 
     # ---------------- Futures helpers ----------------
-    def place_futures_short(self, symbol: str, price: float, qty: float, leverage: int = 2, exchange: bool = True) -> Any:
+    def place_futures_short(self, symbol: str, price: float, qty: float, leverage: int = 2) -> Any:
         try:
             self.futures.set_leverage(leverage, symbol)
         except Exception:
             pass
         return self.futures.create_order(symbol, "limit", "sell", qty, price, params={"reduceOnly": False})
 
-    def close_futures_position(self, symbol: str, qty: float, price: float, exchange: bool = True) -> Any:
+    def close_futures_position(self, symbol: str, qty: float, price: float = True) -> Any:
         return self.futures.create_order(symbol, "limit", "buy", qty, price, params={"reduceOnly": True})
 
     def fetch_spot_balance(self) -> Dict[str, Any]:

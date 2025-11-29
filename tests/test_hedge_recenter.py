@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime
 
-from grid_bot.datas.position import Position
+from grid_bot.dataclass.position import Position
 from tests.fakes import FakeAccountBalance, FakeLogger, FakeStrategy
 
 
@@ -12,9 +12,11 @@ class HedgeTests(unittest.TestCase):
                 super().__init__(mode="backtest")
                 self.closed_reason = None
                 self.rebalanced = False
+
             def _close_hedge(self, timestamp_ms: int, price: float, reason: str) -> None:
                 self.closed_reason = reason
                 self.hedge_position = None
+
             def _rebalance_spot_after_hedge(self, timestamp_ms: int, hedge_pnl: float, price: float) -> None:
                 self.rebalanced = True
 
@@ -75,6 +77,7 @@ class HedgeTests(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.closed_reason = None
+
             def _close_hedge(self, timestamp_ms: int, price: float, reason: str) -> None:
                 self.closed_reason = reason
                 self.hedge_position = None
@@ -136,14 +139,18 @@ class HedgeTests(unittest.TestCase):
     def test_sync_balances_writes_spot_and_futures_to_db(self):
         # Build lightweight live strategy stub to reuse sync_balances_to_db
         from grid_bot.live_strategy import LiveGridStrategy
+
         live = object.__new__(LiveGridStrategy)
         live.acc_balance_db = FakeAccountBalance()
         live.logger = FakeLogger()
+
         class Ex:
             def fetch_spot_balance(self_inner):
                 return {"USDT": {"total": 10000, "free": 8000}}
+
             def fetch_futures_balance(self_inner):
                 return {"info": {"totalWalletBalance": 5000, "availableBalance": 4000}}
+
         live.exchange = Ex()
         live.sync_balances_to_db()
         # Verify two rows written
@@ -153,9 +160,7 @@ class HedgeTests(unittest.TestCase):
 
     def test_records_account_balance_on_hedge_open_close(self):
         strat = FakeStrategy()
-        strat.positions = [
-            Position(symbol="BTCUSDT", side="LONG", entry_price=100.0, qty=1.0, grid_price=95.0, target_price=105.0, opened_at=0, group_id="G1")
-        ]
+        strat.positions = [Position(symbol="BTCUSDT", side="LONG", entry_price=100.0, qty=1.0, grid_price=95.0, target_price=105.0, opened_at=0, group_id="G1")]
         strat._ensure_hedge_ratio(target_ratio=0.5, price=90.0, net_spot_qty=1.0, reason="TEST_OPEN")
         self.assertTrue(any(r.get("notes") == "hedge_open" for r in strat.acc_balance_db.rows))
         # close hedge and ensure snapshot recorded

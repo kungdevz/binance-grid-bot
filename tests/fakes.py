@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from grid_bot.base_strategy import BaseGridStrategy
-from grid_bot.datas.position import Position
+from grid_bot.dataclass.position import Position
 
 
 class FakeLogger:

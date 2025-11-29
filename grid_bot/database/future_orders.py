@@ -43,7 +43,7 @@ class FuturesOrders(BaseMySQLRepo):
                     `orig_type` VARCHAR(32),                          -- ประเภทคำสั่งต้นฉบับ
                     `margin_asset` VARCHAR(16),                       -- สินทรัพย์ margin
                     `leverage` INT                                    -- เลเวอเรจ
-                    )
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
                 """
             )
 
